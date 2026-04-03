@@ -1,0 +1,143 @@
+import { useState } from 'react';
+import {
+  ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+} from 'react-native';
+
+import { supabase } from '../lib/supabase';
+
+type Props = {
+  onGoToSignUp: () => void;
+};
+
+export function SignInScreen({ onGoToSignUp }: Props) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSignIn() {
+    setError(null);
+    setLoading(true);
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+    setLoading(false);
+    if (signInError) {
+      setError(signInError.message);
+    }
+  }
+
+  return (
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <Text style={styles.title}>Connexion</Text>
+      <Text style={styles.hint}>Email et mot de passe</Text>
+
+      <TextInput
+        style={styles.input}
+        placeholder="email@exemple.com"
+        placeholderTextColor="#94a3b8"
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoCorrect={false}
+        value={email}
+        onChangeText={setEmail}
+      />
+      <TextInput
+        style={styles.input}
+        placeholder="Mot de passe"
+        placeholderTextColor="#94a3b8"
+        secureTextEntry
+        value={password}
+        onChangeText={setPassword}
+      />
+
+      {error ? <Text style={styles.error}>{error}</Text> : null}
+
+      <Pressable
+        style={[styles.primaryButton, loading && styles.buttonDisabled]}
+        onPress={() => void handleSignIn()}
+        disabled={loading}
+      >
+        {loading ? (
+          <ActivityIndicator color="#fff" />
+        ) : (
+          <Text style={styles.primaryButtonText}>Se connecter</Text>
+        )}
+      </Pressable>
+
+      <Pressable style={styles.linkWrap} onPress={onGoToSignUp}>
+        <Text style={styles.link}>Pas de compte ? S’inscrire</Text>
+      </Pressable>
+    </KeyboardAvoidingView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#f8fafc',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#0f172a',
+    marginBottom: 8,
+  },
+  hint: {
+    fontSize: 15,
+    color: '#64748b',
+    marginBottom: 24,
+  },
+  input: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    color: '#0f172a',
+    marginBottom: 12,
+  },
+  error: {
+    color: '#b91c1c',
+    marginBottom: 12,
+    fontSize: 14,
+  },
+  primaryButton: {
+    backgroundColor: '#0f766e',
+    borderRadius: 10,
+    paddingVertical: 14,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  buttonDisabled: {
+    opacity: 0.7,
+  },
+  primaryButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  linkWrap: {
+    marginTop: 20,
+    alignItems: 'center',
+  },
+  link: {
+    color: '#0f766e',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+});

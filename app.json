@@ -7,6 +7,15 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Tukme utilise votre position pour afficher la carte autour de vous.",
+          "locationAlwaysAndWhenInUsePermission": "Tukme utilise votre position pour afficher la carte autour de vous."
+        }
+      ]
+    ],
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",

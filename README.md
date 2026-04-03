@@ -22,15 +22,17 @@ cp .env.example .env
 
 ## Scripts
 
-| Commande               | Description                                      |
-| ---------------------- | ------------------------------------------------ |
-| `npm start`            | Démarre le serveur de développement Expo (Metro) |
-| `npm run android`      | Ouvre sur Android (émulateur ou appareil)        |
-| `npm run ios`          | Ouvre sur iOS (macOS + Xcode)                    |
-| `npm run web`          | Ouvre la version web                             |
-| `npm run lint`         | ESLint                                           |
-| `npm run format`       | Prettier (écriture)                              |
-| `npm run format:check` | Prettier (vérification sans écrire)              |
+| Commande               | Description                                  |
+| ---------------------- | -------------------------------------------- |
+| `npm start`            | Démarre le serveur Expo (Metro) sur **8082** |
+| `npm run android`      | Ouvre sur Android (émulateur ou appareil)    |
+| `npm run ios`          | Ouvre sur iOS (macOS + Xcode)                |
+| `npm run web`          | Ouvre la version web                         |
+| `npm run lint`         | ESLint                                       |
+| `npm run format`       | Prettier (écriture)                          |
+| `npm run format:check` | Prettier (vérification sans écrire)          |
+
+**Note**: le projet est standardisé sur le port **8082** pour éviter les collisions. Les scripts forcent aussi `CI=0` (certains environnements exportent `CI=1`, ce qui désactive le mode interactif d’Expo).
 
 ## Structure
 

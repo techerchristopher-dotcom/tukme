@@ -3,22 +3,31 @@
   "version": "1.0.0",
   "main": "index.ts",
   "scripts": {
-    "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web",
+    "start": "cross-env CI=0 expo start --port 8082",
+    "android": "cross-env CI=0 expo start --android --port 8082",
+    "ios": "cross-env CI=0 expo start --ios --port 8082",
+    "web": "cross-env CI=0 expo start --web --port 8082",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "check:env": "node scripts/check-expo-google-env.mjs"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@supabase/supabase-js": "^2.101.1",
     "expo": "~54.0.33",
+    "expo-location": "~19.0.8",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
-    "react-native": "0.81.5"
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-maps": "1.20.1",
+    "react-native-url-polyfill": "^3.0.0",
+    "react-native-web": "^0.21.0"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
+    "cross-env": "^10.1.0",
     "eslint": "^9.39.4",
     "eslint-config-expo": "~10.0.0",
     "eslint-config-prettier": "^10.1.8",
