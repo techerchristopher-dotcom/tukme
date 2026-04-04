@@ -1,6 +1,12 @@
 import type { Session } from '@supabase/supabase-js';
 import * as Location from 'expo-location';
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import {
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   ActivityIndicator,
   Keyboard,
@@ -28,6 +34,13 @@ import {
 } from '../lib/googlePlaces';
 import { useRideZonePricing } from '../hooks/useRideZonePricing';
 import { useRouteMetrics } from '../hooks/useRouteMetrics';
+import {
+  cancelRideAsClient,
+  CancelRideError,
+} from '../lib/cancelRide';
+import { insertRequestedRide } from '../lib/createRide';
+import { useActiveRide } from '../hooks/useActiveRide';
+import type { ClientRideStatus } from '../types/clientRide';
 import { formatAriary } from '../lib/taxiPricing';
 import type { ClientDestination } from '../types/clientDestination';
 import type { RidePricingEstimate } from '../types/ridePricing';
@@ -38,6 +51,27 @@ type Props = {
   profile: Profile;
   onDevResetRole: () => Promise<void>;
 };
+
+function clientRideStatusMessage(status: ClientRideStatus): string {
+  switch (status) {
+    case 'requested':
+      return 'Demande envoyée — recherche d’un chauffeur.';
+    case 'accepted':
+      return 'Chauffeur trouvé.';
+    case 'in_progress':
+      return 'Course en cours.';
+    case 'completed':
+      return 'Course terminée.';
+    case 'cancelled_by_client':
+      return 'Course annulée.';
+    case 'cancelled_by_driver':
+      return 'Course annulée par le chauffeur.';
+    case 'expired':
+      return 'Demande expirée.';
+    default:
+      return 'État de la course mis à jour.';
+  }
+}
 
 function formatCurrentPositionText(location: ClientLocationState): string {
   if (location.phase === 'loading') {
@@ -126,6 +160,30 @@ function ClientMapBlock(props: {
 }) {
   const { location, destination, routeMetrics } = props;
 
+  const mapRef = useRef<InstanceType<
+    typeof import('react-native-maps').default
+  > | null>(null);
+
+  useEffect(() => {
+    if (location.phase !== 'ready') {
+      return;
+    }
+    if (
+      !destination ||
+      !routeMetrics.polylineCoordinates ||
+      routeMetrics.polylineCoordinates.length < 2
+    ) {
+      return;
+    }
+    const id = requestAnimationFrame(() => {
+      mapRef.current?.fitToCoordinates(routeMetrics.polylineCoordinates!, {
+        edgePadding: { top: 52, right: 36, bottom: 88, left: 36 },
+        animated: true,
+      });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [location.phase, destination, routeMetrics.polylineCoordinates]);
+
   if (location.phase === 'loading') {
     return (
       <View style={styles.mapSlot}>
@@ -150,6 +208,7 @@ function ClientMapBlock(props: {
   const Maps = require('react-native-maps') as typeof import('react-native-maps');
   const MapView = Maps.default;
   const Marker = Maps.Marker;
+  const Polyline = Maps.Polyline;
 
   const mapTitle = destination
     ? 'Carte — départ et destination'
@@ -164,7 +223,12 @@ function ClientMapBlock(props: {
           ? `\nDestination : ${destination.latitude.toFixed(5)}, ${destination.longitude.toFixed(5)}`
           : ''}
       </Text>
-      <MapView style={styles.map} region={region} showsCompass>
+      <MapView
+        ref={mapRef}
+        style={styles.map}
+        initialRegion={region}
+        showsCompass
+      >
         <Marker coordinate={{ latitude, longitude }} title="Vous êtes ici" />
         {destination ? (
           <Marker
@@ -175,6 +239,16 @@ function ClientMapBlock(props: {
             title="Destination"
             description={destination.label}
             pinColor="#b45309"
+          />
+        ) : null}
+        {routeMetrics.polylineCoordinates &&
+        routeMetrics.polylineCoordinates.length >= 2 ? (
+          <Polyline
+            coordinates={routeMetrics.polylineCoordinates}
+            strokeColor="#0f766e"
+            strokeWidth={5}
+            lineJoin="round"
+            lineCap="round"
           />
         ) : null}
       </MapView>
@@ -379,7 +453,17 @@ function PlacesDestinationSection(props: {
   );
 }
 
-function ClientHomeMiddleContent() {
+function ClientHomeMiddleContent(props: { userId: string }) {
+  const { userId } = props;
+  const {
+    ride,
+    fetchLoading: rideFetchLoading,
+    fetchError: rideFetchError,
+    realtimeError: rideRealtimeError,
+    hasOpenRide,
+    registerRideAfterCreate,
+    dismissRide,
+  } = useActiveRide(userId);
   const location = useClientLocation();
   const [searchInput, setSearchInput] = useState('');
   const [structuredDestination, setStructuredDestination] =
@@ -389,6 +473,13 @@ function ClientHomeMiddleContent() {
   const [sessionToken, setSessionToken] = useState(newSessionToken);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [pickupLabel, setPickupLabel] = useState<string | null>(null);
+  const [orderLoading, setOrderLoading] = useState(false);
+  const [orderError, setOrderError] = useState<string | null>(null);
+  const [cancelLoading, setCancelLoading] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  /** Bloque les double clics avant le prochain rendu (setState asynchrone). */
+  const orderRequestInFlightRef = useRef(false);
+  const cancelRequestInFlightRef = useRef(false);
 
   const pickupLat =
     location.phase === 'ready' ? location.latitude : null;
@@ -449,6 +540,41 @@ function ClientHomeMiddleContent() {
     destination: structuredDestination,
   });
 
+  const canOrder = useMemo(() => {
+    if (!userId.trim()) {
+      return false;
+    }
+    if (!structuredDestination) {
+      return false;
+    }
+    if (pickupLat == null || pickupLng == null) {
+      return false;
+    }
+    if (!ridePricing || ridePricing.pricingMode === 'loading') {
+      return false;
+    }
+    if (routeMetrics.loading || routeMetrics.error) {
+      return false;
+    }
+    if (
+      routeMetrics.distanceMeters == null ||
+      routeMetrics.durationSeconds == null
+    ) {
+      return false;
+    }
+    return true;
+  }, [
+    userId,
+    structuredDestination,
+    pickupLat,
+    pickupLng,
+    ridePricing,
+    routeMetrics.loading,
+    routeMetrics.error,
+    routeMetrics.distanceMeters,
+    routeMetrics.durationSeconds,
+  ]);
+
   const configError = useMemo(() => {
     if (isPlacesConfigured()) {
       return null;
@@ -460,8 +586,121 @@ function ClientHomeMiddleContent() {
     setSearchInput(value);
     setSuggestionsSuspended(false);
     setDetailsError(null);
+    setOrderError(null);
+    setCancelError(null);
+    orderRequestInFlightRef.current = false;
     if (structuredDestination) {
       setStructuredDestination(null);
+    }
+  }
+
+  async function handleOrderPress() {
+    if (
+      !canOrder ||
+      !structuredDestination ||
+      pickupLat == null ||
+      pickupLng == null ||
+      !ridePricing ||
+      ridePricing.pricingMode === 'loading'
+    ) {
+      return;
+    }
+    if (
+      routeMetrics.distanceMeters == null ||
+      routeMetrics.durationSeconds == null
+    ) {
+      return;
+    }
+
+    const pricingMode = ridePricing.pricingMode;
+    if (pricingMode !== 'normal' && pricingMode !== 'fallback') {
+      return;
+    }
+
+    if (hasOpenRide) {
+      if (__DEV__) {
+        console.log('[ride-create] locked after success');
+      }
+      return;
+    }
+
+    if (orderRequestInFlightRef.current) {
+      if (__DEV__) {
+        console.log('[ride-create] ignored duplicate click');
+      }
+      return;
+    }
+
+    orderRequestInFlightRef.current = true;
+    setOrderLoading(true);
+    setOrderError(null);
+
+    try {
+      const { id } = await insertRequestedRide({
+        client_id: userId,
+        status: 'requested',
+        pickup_lat: pickupLat,
+        pickup_lng: pickupLng,
+        pickup_label: pickupLabel,
+        destination_lat: structuredDestination.latitude,
+        destination_lng: structuredDestination.longitude,
+        destination_label: structuredDestination.label,
+        destination_place_id: structuredDestination.placeId ?? null,
+        pickup_zone: ridePricing.pickupZone,
+        destination_zone: ridePricing.destinationZone,
+        estimated_price_ariary: ridePricing.estimatedPriceAriary,
+        estimated_price_eur: ridePricing.estimatedPriceEuro,
+        pricing_mode: pricingMode,
+        estimated_distance_m: Math.round(routeMetrics.distanceMeters),
+        estimated_duration_s: Math.round(routeMetrics.durationSeconds),
+        route_polyline: routeMetrics.encodedPolyline,
+      });
+      await registerRideAfterCreate(id);
+      setCancelError(null);
+    } catch (e) {
+      setOrderError(
+        e instanceof Error ? e.message : 'Impossible d’enregistrer la course.'
+      );
+    } finally {
+      orderRequestInFlightRef.current = false;
+      setOrderLoading(false);
+    }
+  }
+
+  async function handleCancelPress() {
+    const rideId = ride?.id;
+    if (
+      !rideId ||
+      ride?.status !== 'requested' ||
+      cancelLoading ||
+      cancelRequestInFlightRef.current
+    ) {
+      return;
+    }
+    cancelRequestInFlightRef.current = true;
+    setCancelLoading(true);
+    setCancelError(null);
+    try {
+      await cancelRideAsClient(rideId);
+      dismissRide();
+      orderRequestInFlightRef.current = false;
+    } catch (e) {
+      if (e instanceof CancelRideError) {
+        setCancelError(e.message);
+        if (e.clearPendingRide) {
+          dismissRide();
+          orderRequestInFlightRef.current = false;
+        }
+      } else {
+        setCancelError(
+          e instanceof Error
+            ? e.message
+            : 'Impossible d’annuler la course pour le moment.'
+        );
+      }
+    } finally {
+      cancelRequestInFlightRef.current = false;
+      setCancelLoading(false);
     }
   }
 
@@ -478,6 +717,9 @@ function ClientHomeMiddleContent() {
         placeId: item.placeId,
         sessionToken: token,
       });
+      setOrderError(null);
+      setCancelError(null);
+      orderRequestInFlightRef.current = false;
       setStructuredDestination({
         label: details.label,
         latitude: details.latitude,
@@ -516,6 +758,112 @@ function ClientHomeMiddleContent() {
         estimate={ridePricing}
         hasDestination={structuredDestination !== null}
       />
+      {structuredDestination || ride != null ? (
+        <View style={styles.orderBlock}>
+          {rideFetchLoading && !ride ? (
+            <View style={styles.rideFetchLoadingRow}>
+              <ActivityIndicator size="small" color="#0f766e" />
+              <Text style={styles.rideFetchLoadingText}>
+                Chargement de votre course…
+              </Text>
+            </View>
+          ) : null}
+          {rideFetchError ? (
+            <Text style={styles.orderError}>{rideFetchError}</Text>
+          ) : null}
+          {structuredDestination ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.orderButton,
+                (!canOrder || orderLoading || hasOpenRide) &&
+                  styles.orderButtonDisabled,
+                pressed &&
+                  canOrder &&
+                  !orderLoading &&
+                  !hasOpenRide &&
+                  styles.orderButtonPressed,
+              ]}
+              disabled={!canOrder || orderLoading || hasOpenRide}
+              onPress={() => void handleOrderPress()}
+            >
+              {orderLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.orderButtonLabel}>Commander</Text>
+              )}
+            </Pressable>
+          ) : null}
+          {!structuredDestination && ride != null ? (
+            <Text style={styles.orderHint}>
+              Une course est en cours. Saisissez une destination pour préparer
+              une prochaine commande après la fin de celle-ci, ou attendez la
+              mise à jour du statut.
+            </Text>
+          ) : null}
+          {!canOrder &&
+          !orderLoading &&
+          !hasOpenRide &&
+          structuredDestination ? (
+            <Text style={styles.orderHint}>
+              {!userId.trim()
+                ? 'Session invalide.'
+                : pickupLat == null || pickupLng == null
+                  ? 'Position de départ requise.'
+                  : !ridePricing
+                    ? 'Estimation tarif indisponible.'
+                    : ridePricing.pricingMode === 'loading'
+                      ? 'Tarif en cours de chargement…'
+                      : routeMetrics.loading
+                        ? 'Itinéraire en cours de calcul…'
+                        : routeMetrics.error
+                          ? 'Itinéraire indisponible.'
+                          : routeMetrics.distanceMeters == null ||
+                              routeMetrics.durationSeconds == null
+                            ? 'Métriques d’itinéraire manquantes.'
+                            : 'Complétez les conditions pour commander.'}
+            </Text>
+          ) : null}
+          {ride ? (
+            <Text
+              style={
+                ride.status === 'requested' ||
+                ride.status === 'accepted' ||
+                ride.status === 'in_progress'
+                  ? styles.orderSuccess
+                  : styles.orderRideTerminal
+              }
+            >
+              {clientRideStatusMessage(ride.status)}
+            </Text>
+          ) : null}
+          {rideRealtimeError ? (
+            <Text style={styles.orderRealtimeWarning}>{rideRealtimeError}</Text>
+          ) : null}
+          {ride?.status === 'requested' ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.orderCancelButton,
+                cancelLoading && styles.orderButtonDisabled,
+                pressed && !cancelLoading && styles.orderCancelButtonPressed,
+              ]}
+              disabled={cancelLoading}
+              onPress={() => void handleCancelPress()}
+            >
+              {cancelLoading ? (
+                <ActivityIndicator color="#0f766e" />
+              ) : (
+                <Text style={styles.orderCancelLabel}>Annuler la course</Text>
+              )}
+            </Pressable>
+          ) : null}
+          {cancelError ? (
+            <Text style={styles.orderError}>{cancelError}</Text>
+          ) : null}
+          {orderError ? (
+            <Text style={styles.orderError}>{orderError}</Text>
+          ) : null}
+        </View>
+      ) : null}
       <PlacesDestinationSection
         location={location}
         searchInput={searchInput}
@@ -542,7 +890,9 @@ export function ClientHomeScreen({
       profile={profile}
       headline="Espace client"
       onDevResetRole={onDevResetRole}
-      middleContent={<ClientHomeMiddleContent />}
+      middleContent={
+        <ClientHomeMiddleContent userId={session.user.id} />
+      }
     />
   );
 }
@@ -813,5 +1163,91 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#64748b',
     fontWeight: '500',
+  },
+  orderBlock: {
+    width: '100%',
+    maxWidth: 400,
+    marginBottom: 16,
+  },
+  orderButton: {
+    backgroundColor: '#0f766e',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+  },
+  orderButtonPressed: {
+    opacity: 0.92,
+  },
+  orderButtonDisabled: {
+    backgroundColor: '#94a3b8',
+  },
+  orderButtonLabel: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  orderHint: {
+    marginTop: 8,
+    fontSize: 13,
+    color: '#64748b',
+    lineHeight: 18,
+  },
+  orderSuccess: {
+    marginTop: 10,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#047857',
+    lineHeight: 20,
+  },
+  orderRideTerminal: {
+    marginTop: 10,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#475569',
+    lineHeight: 20,
+  },
+  orderRealtimeWarning: {
+    marginTop: 8,
+    fontSize: 13,
+    color: '#b45309',
+    lineHeight: 18,
+  },
+  rideFetchLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  rideFetchLoadingText: {
+    fontSize: 14,
+    color: '#64748b',
+  },
+  orderError: {
+    marginTop: 10,
+    fontSize: 14,
+    color: '#b91c1c',
+    lineHeight: 20,
+  },
+  orderCancelButton: {
+    marginTop: 12,
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#0f766e',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+    backgroundColor: '#fff',
+  },
+  orderCancelButtonPressed: {
+    opacity: 0.88,
+    backgroundColor: '#f0fdfa',
+  },
+  orderCancelLabel: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#0f766e',
   },
 });

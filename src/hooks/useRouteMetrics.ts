@@ -3,23 +3,36 @@ import { useEffect, useState } from 'react';
 import {
   computeRouteMetrics,
   isRoutesApiConfigured,
+  type LatLngPoint,
 } from '../lib/googleRoutes';
 import type { ClientDestination } from '../types/clientDestination';
 
 export type RouteMetricsUiState = {
   loading: boolean;
   error: string | null;
+  /** Mètres (Routes API), pour persistance. */
+  distanceMeters: number | null;
+  /** Secondes (Routes API), pour persistance. */
+  durationSeconds: number | null;
+  /** Polyline encodée (Routes API), pour `rides.route_polyline`. */
+  encodedPolyline: string | null;
   /** Arrondi 0,1 km pour l’affichage */
   distanceKm: number | null;
   /** Durée arrondie en minutes (≥ 1 si > 0 s) */
   durationMinutes: number | null;
+  /** Tracé décodé pour `Polyline` ; null si absent ou vide. */
+  polylineCoordinates: LatLngPoint[] | null;
 };
 
 const initial: RouteMetricsUiState = {
   loading: false,
   error: null,
+  distanceMeters: null,
+  durationSeconds: null,
+  encodedPolyline: null,
   distanceKm: null,
   durationMinutes: null,
+  polylineCoordinates: null,
 };
 
 export function useRouteMetrics(params: {
@@ -45,8 +58,12 @@ export function useRouteMetrics(params: {
     setState({
       loading: true,
       error: null,
+      distanceMeters: null,
+      durationSeconds: null,
+      encodedPolyline: null,
       distanceKm: null,
       durationMinutes: null,
+      polylineCoordinates: null,
     });
 
     void (async () => {
@@ -69,8 +86,13 @@ export function useRouteMetrics(params: {
         setState({
           loading: false,
           error: null,
+          distanceMeters: metrics.distanceMeters,
+          durationSeconds: metrics.durationSeconds,
+          encodedPolyline: metrics.encodedPolyline,
           distanceKm: km,
           durationMinutes: minutes,
+          polylineCoordinates:
+            metrics.coordinates.length > 0 ? metrics.coordinates : null,
         });
       } catch (e) {
         if (cancelled) {
@@ -83,8 +105,12 @@ export function useRouteMetrics(params: {
         setState({
           loading: false,
           error: message,
+          distanceMeters: null,
+          durationSeconds: null,
+          encodedPolyline: null,
           distanceKm: null,
           durationMinutes: null,
+          polylineCoordinates: null,
         });
       }
     })();
