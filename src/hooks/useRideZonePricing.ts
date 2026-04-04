@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import { supabase } from '../lib/supabase';
 import {
-  getZoneFromAddress,
-  getZoneFromCoords,
+  resolveZoneFromLabelAndCoords,
   type ZoneRow,
 } from '../lib/zoneGeo';
 import type { ClientDestination } from '../types/clientDestination';
@@ -12,6 +11,8 @@ import type { RidePricingEstimate } from '../types/ridePricing';
 /** Forfait app si zones non détectées ou couple absent de `zone_pricing`. */
 const FALLBACK_PRICE_ARIARY = 10_000;
 const FALLBACK_PRICE_EUR = 2;
+
+const LOG = '[zone-debug]';
 
 type ZonePricingRow = {
   price_eur: number;
@@ -33,9 +34,11 @@ async function fetchZones(): Promise<{ rows: ZoneRow[]; error: Error | null }> {
 export function useRideZonePricing(params: {
   pickupLat: number | null;
   pickupLng: number | null;
+  /** Texte optionnel (ex. reverse geocode) pour aligner départ / destination. */
+  pickupLabel: string | null;
   destination: ClientDestination | null;
 }): RidePricingEstimate | null {
-  const { pickupLat, pickupLng, destination } = params;
+  const { pickupLat, pickupLng, pickupLabel, destination } = params;
 
   const [zoneRows, setZoneRows] = useState<ZoneRow[]>([]);
   const [zonesReady, setZonesReady] = useState(false);
@@ -54,13 +57,26 @@ export function useRideZonePricing(params: {
       if (error) {
         setZoneRows([]);
         if (__DEV__) {
-          console.warn('[zones] Erreur chargement zones Supabase:', error.message);
+          console.warn(`${LOG}[zones] Erreur chargement:`, error.message);
         }
         return;
       }
       setZoneRows(rows);
       if (__DEV__) {
-        console.log('[zones] Zones chargées:', rows.length);
+        const names = rows.map((z) => z.name);
+        console.log(`${LOG}[zones] count=`, rows.length, 'names=', names);
+        const amba = rows.find((z) => z.name === 'Ambatoloaka');
+        if (amba) {
+          console.log(`${LOG}[zones] Ambatoloaka bbox Supabase:`, {
+            min_lat: amba.min_lat,
+            max_lat: amba.max_lat,
+            min_lng: amba.min_lng,
+            max_lng: amba.max_lng,
+            match_priority: amba.match_priority,
+          });
+        } else {
+          console.log(`${LOG}[zones] Aucune ligne nommée "Ambatoloaka" dans le jeu chargé`);
+        }
       }
     })();
     return () => {
@@ -68,51 +84,127 @@ export function useRideZonePricing(params: {
     };
   }, []);
 
-  const pickupZone = useMemo(() => {
-    if (
-      pickupLat == null ||
-      pickupLng == null ||
-      zoneRows.length === 0 ||
-      !zonesReady
-    ) {
-      return null;
+  const pickupResolution = useMemo(() => {
+    if (!zonesReady || zoneRows.length === 0) {
+      return {
+        fromText: null as string | null,
+        fromCoords: null as string | null,
+        zone: null as string | null,
+      };
     }
-    if (__DEV__) {
-      console.log('[zones] GPS utilisateur (départ):', pickupLat, pickupLng);
-    }
-    const z = getZoneFromCoords(pickupLat, pickupLng, zoneRows);
-    if (__DEV__) {
-      console.log('[zones] Zone départ détectée:', z);
-    }
-    return z;
-  }, [pickupLat, pickupLng, zoneRows, zonesReady]);
+    return resolveZoneFromLabelAndCoords(
+      pickupLabel,
+      pickupLat,
+      pickupLng,
+      zoneRows
+    );
+  }, [zonesReady, zoneRows, pickupLabel, pickupLat, pickupLng]);
 
-  const destinationZone = useMemo(() => {
-    if (!destination || zoneRows.length === 0 || !zonesReady) {
-      return null;
+  const pickupZone = pickupResolution.zone;
+
+  useEffect(() => {
+    if (!__DEV__ || !zonesReady || zoneRows.length === 0) {
+      return;
     }
-    const destinationAddress = destination.label;
-    const fromAddress = getZoneFromAddress(destinationAddress, zoneRows);
-    const fromCoords = getZoneFromCoords(
+    console.log(`${LOG}[pickup] lat,lng=`, pickupLat, pickupLng);
+    console.log(
+      `${LOG}[pickup] label (reverse geocode)=`,
+      pickupLabel ?? '(absent)'
+    );
+    console.log(`${LOG}[pickup] zone texte=`, pickupResolution.fromText);
+    console.log(`${LOG}[pickup] zone GPS=`, pickupResolution.fromCoords);
+    console.log(`${LOG}[pickup] zone finale=`, pickupZone);
+    if (pickupZone == null) {
+      console.log(
+        `${LOG}[pickup] null → raison: texte=${
+          pickupLabel?.trim()
+            ? pickupResolution.fromText === null
+              ? 'aucun name ne matche'
+              : 'n/a'
+            : 'pas de label'
+        }; GPS=${
+          pickupLat != null && pickupLng != null
+            ? pickupResolution.fromCoords === null
+              ? 'point hors de toutes les bbox'
+              : 'n/a'
+            : 'coords invalides/absentes'
+        }`
+      );
+    }
+  }, [
+    zonesReady,
+    zoneRows.length,
+    pickupLat,
+    pickupLng,
+    pickupLabel,
+    pickupResolution.fromText,
+    pickupResolution.fromCoords,
+    pickupZone,
+  ]);
+
+  const destinationResolution = useMemo(() => {
+    if (!destination || !zonesReady || zoneRows.length === 0) {
+      return {
+        fromText: null as string | null,
+        fromCoords: null as string | null,
+        zone: null as string | null,
+      };
+    }
+    return resolveZoneFromLabelAndCoords(
+      destination.label,
       destination.latitude,
       destination.longitude,
       zoneRows
     );
-    const z = fromAddress ?? fromCoords;
+  }, [destination, zonesReady, zoneRows]);
 
-    if (__DEV__) {
-      console.log('[zones] destinationAddress reçu:', destinationAddress);
-      console.log('[zones] getZoneFromAddress →', fromAddress);
-      console.log(
-        '[zones] Coords destination (Places):',
-        destination.latitude,
-        destination.longitude
-      );
-      console.log('[zones] getZoneFromCoords →', fromCoords);
-      console.log('[zones] Zone destination finale:', z);
+  const destinationZone = destinationResolution.zone;
+
+  useEffect(() => {
+    if (!__DEV__ || !destination || !zonesReady || zoneRows.length === 0) {
+      return;
     }
-    return z;
-  }, [destination, zoneRows, zonesReady]);
+    console.log(
+      `${LOG}[destination] label (Places)=`,
+      JSON.stringify(destination.label)
+    );
+    console.log(
+      `${LOG}[destination] lat,lng=`,
+      destination.latitude,
+      destination.longitude
+    );
+    console.log(
+      `${LOG}[destination] getZoneFromAddress →`,
+      destinationResolution.fromText
+    );
+    console.log(
+      `${LOG}[destination] getZoneFromCoords →`,
+      destinationResolution.fromCoords
+    );
+    console.log(`${LOG}[destination] zone finale=`, destinationZone);
+    if (destinationZone == null) {
+      console.log(
+        `${LOG}[destination] null → raison: texte=${
+          destination.label?.trim()
+            ? destinationResolution.fromText === null
+              ? 'aucun name ne matche'
+              : 'n/a'
+            : 'label vide'
+        }; GPS=${
+          destinationResolution.fromCoords === null
+            ? 'point hors de toutes les bbox'
+            : 'n/a'
+        }`
+      );
+    }
+  }, [
+    destination,
+    zonesReady,
+    zoneRows.length,
+    destinationResolution.fromText,
+    destinationResolution.fromCoords,
+    destinationZone,
+  ]);
 
   useEffect(() => {
     if (!pickupZone || !destinationZone) {
@@ -139,7 +231,7 @@ export function useRideZonePricing(params: {
 
       if (error) {
         if (__DEV__) {
-          console.warn('[zones] Erreur tarif Supabase:', error.message);
+          console.warn(`${LOG} Erreur zone_pricing:`, error.message);
         }
         setPriceRow(null);
         return;
@@ -152,7 +244,7 @@ export function useRideZonePricing(params: {
         });
         if (__DEV__) {
           console.log(
-            '[zones] Tarif trouvé:',
+            `${LOG} Tarif OK:`,
             pickupZone,
             '→',
             destinationZone,
@@ -163,7 +255,7 @@ export function useRideZonePricing(params: {
         setPriceRow(null);
         if (__DEV__) {
           console.log(
-            '[zones] Aucune ligne zone_pricing pour',
+            `${LOG} Pas de ligne zone_pricing pour`,
             pickupZone,
             '→',
             destinationZone

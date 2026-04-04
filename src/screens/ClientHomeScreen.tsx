@@ -1,5 +1,6 @@
 import type { Session } from '@supabase/supabase-js';
-import { type ReactNode, useMemo, useState } from 'react';
+import * as Location from 'expo-location';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Keyboard,
@@ -26,6 +27,7 @@ import {
   newSessionToken,
 } from '../lib/googlePlaces';
 import { useRideZonePricing } from '../hooks/useRideZonePricing';
+import { useRouteMetrics } from '../hooks/useRouteMetrics';
 import { formatAriary } from '../lib/taxiPricing';
 import type { ClientDestination } from '../types/clientDestination';
 import type { RidePricingEstimate } from '../types/ridePricing';
@@ -120,8 +122,9 @@ function TripSummaryCard(props: {
 function ClientMapBlock(props: {
   location: ClientLocationState;
   destination: ClientDestination | null;
+  routeMetrics: ReturnType<typeof useRouteMetrics>;
 }) {
-  const { location, destination } = props;
+  const { location, destination, routeMetrics } = props;
 
   if (location.phase === 'loading') {
     return (
@@ -175,6 +178,26 @@ function ClientMapBlock(props: {
           />
         ) : null}
       </MapView>
+      {destination ? (
+        <View style={styles.mapRouteRow}>
+          {routeMetrics.loading ? (
+            <View style={styles.mapRouteLoading}>
+              <ActivityIndicator size="small" color="#0f766e" />
+              <Text style={styles.mapRouteMuted}>Calcul de l’itinéraire…</Text>
+            </View>
+          ) : routeMetrics.error ? (
+            <Text style={styles.mapRouteError} numberOfLines={3}>
+              Itinéraire : {routeMetrics.error}
+            </Text>
+          ) : routeMetrics.distanceKm != null &&
+            routeMetrics.durationMinutes != null ? (
+            <Text style={styles.mapRouteStats}>
+              Environ {routeMetrics.distanceKm.toLocaleString('fr-FR')} km ·{' '}
+              {routeMetrics.durationMinutes} min
+            </Text>
+          ) : null}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -365,15 +388,64 @@ function ClientHomeMiddleContent() {
   const [pickingPlace, setPickingPlace] = useState(false);
   const [sessionToken, setSessionToken] = useState(newSessionToken);
   const [detailsError, setDetailsError] = useState<string | null>(null);
+  const [pickupLabel, setPickupLabel] = useState<string | null>(null);
 
   const pickupLat =
     location.phase === 'ready' ? location.latitude : null;
   const pickupLng =
     location.phase === 'ready' ? location.longitude : null;
 
+  useEffect(() => {
+    if (pickupLat == null || pickupLng == null) {
+      setPickupLabel(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const rows = await Location.reverseGeocodeAsync({
+          latitude: pickupLat,
+          longitude: pickupLng,
+        });
+        if (cancelled || rows.length === 0) {
+          return;
+        }
+        const a = rows[0];
+        const parts = [
+          a.formattedAddress,
+          a.name,
+          a.street,
+          a.district,
+          a.city,
+          a.subregion,
+          a.region,
+        ].filter((p): p is string => !!p?.trim());
+        const unique = [...new Set(parts)];
+        setPickupLabel(unique.join(' ').trim() || null);
+      } catch {
+        if (!cancelled) {
+          setPickupLabel(null);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pickupLat, pickupLng]);
+
   const ridePricing = useRideZonePricing({
     pickupLat,
     pickupLng,
+    pickupLabel,
+    destination: structuredDestination,
+  });
+
+  const routeMetrics = useRouteMetrics({
+    originLat: pickupLat,
+    originLng: pickupLng,
     destination: structuredDestination,
   });
 
@@ -435,7 +507,11 @@ function ClientHomeMiddleContent() {
         location={location}
         destination={structuredDestination}
       />
-      <ClientMapBlock location={location} destination={structuredDestination} />
+      <ClientMapBlock
+        location={location}
+        destination={structuredDestination}
+        routeMetrics={routeMetrics}
+      />
       <ZonePricingCard
         estimate={ridePricing}
         hasDestination={structuredDestination !== null}
@@ -535,6 +611,29 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: '#e2e8f0',
+  },
+  mapRouteRow: {
+    marginTop: 10,
+    minHeight: 22,
+  },
+  mapRouteLoading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  mapRouteMuted: {
+    fontSize: 13,
+    color: '#64748b',
+  },
+  mapRouteStats: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0f766e',
+  },
+  mapRouteError: {
+    fontSize: 12,
+    color: '#b45309',
+    lineHeight: 18,
   },
   mapSlot: {
     width: '100%',

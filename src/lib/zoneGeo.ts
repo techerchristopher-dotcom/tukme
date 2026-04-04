@@ -1,9 +1,9 @@
 /**
- * Détection de zone par coordonnées — données fournies par Supabase (table `zones`).
- * `zones` doit être trié par `match_priority` croissant (première boîte qui contient le point gagne).
+ * Détection de zone : noms Supabase + bounding boxes.
+ * Priorité métier : texte (libellé / reverse geocode) puis GPS.
  *
- * Détection par texte : compare les `name` Supabase au libellé (ex. Places), pour les POI
- * hors bounding box ou boîtes trop étroites.
+ * `getZoneFromCoords` : première zone dont la bbox contient le point,
+ * selon `match_priority` croissant (comme l’ordre renvoyé par Supabase).
  */
 
 export type ZoneRow = {
@@ -16,18 +16,57 @@ export type ZoneRow = {
   match_priority: number;
 };
 
-function normalizeForMatch(value: string): string {
+export type ZoneResolutionDiagnostic = {
+  fromText: string | null;
+  fromCoords: string | null;
+  zone: string | null;
+};
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Normalise pour comparaison : accents, casse, tirets/underscores,
+ * ponctuation courante → espaces, espaces multiples.
+ */
+export function normalizeForMatch(value: string): string {
   return value
     .normalize('NFD')
     .replace(/\p{M}/gu, '')
     .toLowerCase()
     .replace(/[_\-]+/g, ' ')
+    .replace(/[.,;:!?'"()[\]{}|/\\]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 /**
- * Première zone (par `match_priority` croissant) dont le nom apparaît dans l’adresse / libellé.
+ * Vérifie si le nom de zone apparaît comme « mot(s) » dans le texte
+ * (évite les faux positifs type sous-chaîne collée à d’autres lettres).
+ * Gère les noms multi-mots (ex. Dar es Salam, Hell-Ville → hell ville).
+ */
+export function zoneNameMatchesHaystack(
+  haystackNormalized: string,
+  zoneNameNormalized: string
+): boolean {
+  if (!zoneNameNormalized || !haystackNormalized) {
+    return false;
+  }
+  if (haystackNormalized === zoneNameNormalized) {
+    return true;
+  }
+  const words = zoneNameNormalized.split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return false;
+  }
+  const body = words.map((w) => escapeRegExp(w)).join('\\s+');
+  const re = new RegExp(`(^|\\s)${body}(\\s|$)`, 'u');
+  return re.test(haystackNormalized);
+}
+
+/**
+ * Première zone (par `match_priority` croissant) dont le nom matche le texte.
  */
 export function getZoneFromAddress(
   address: string | null | undefined,
@@ -45,7 +84,7 @@ export function getZoneFromAddress(
   );
   for (const z of ordered) {
     const needle = normalizeForMatch(z.name);
-    if (needle && haystack.includes(needle)) {
+    if (needle && zoneNameMatchesHaystack(haystack, needle)) {
       return z.name;
     }
   }
@@ -60,7 +99,10 @@ export function getZoneFromCoords(
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
     return null;
   }
-  for (const z of zones) {
+  const ordered = [...zones].sort(
+    (a, b) => a.match_priority - b.match_priority
+  );
+  for (const z of ordered) {
     if (
       lat >= z.min_lat &&
       lat <= z.max_lat &&
@@ -71,4 +113,29 @@ export function getZoneFromCoords(
     }
   }
   return null;
+}
+
+/**
+ * Stratégie unifiée : libellé (si présent) puis coordonnées.
+ * Utilisé pour départ (reverse geocode optionnel) et destination (Places).
+ */
+export function resolveZoneFromLabelAndCoords(
+  label: string | null | undefined,
+  lat: number | null | undefined,
+  lng: number | null | undefined,
+  zones: ZoneRow[]
+): ZoneResolutionDiagnostic {
+  const fromText = getZoneFromAddress(label, zones);
+  const fromCoords =
+    lat != null &&
+    lng != null &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng)
+      ? getZoneFromCoords(lat, lng, zones)
+      : null;
+  return {
+    fromText,
+    fromCoords,
+    zone: fromText ?? fromCoords,
+  };
 }
