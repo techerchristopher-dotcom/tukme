@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { supabase } from '../lib/supabase';
+import { supabase, syncRealtimeAuth } from '../lib/supabase';
 import type { ClientRideSnapshot, ClientRideStatus } from '../types/clientRide';
 
 const LOG = '[ride-realtime]';
@@ -235,77 +235,121 @@ export function useActiveRide(userId: string) {
     };
   }, [clearTerminalTimer, removeChannel]);
 
+  /** Si le statut passe en terminal hors callback Realtime (ex. refetch), fermer le canal. */
   useEffect(() => {
-    if (!ride || !isOpenStatus(ride.status)) {
+    const st = ride?.status;
+    if (st == null) {
+      return;
+    }
+    if (isOpenStatus(st)) {
+      return;
+    }
+    removeChannel();
+  }, [ride?.id, ride?.status, removeChannel]);
+
+  useEffect(() => {
+    const rid = ride?.id;
+    const st = ride?.status;
+    if (!rid || !st || !isOpenStatus(st)) {
       removeChannel();
       return;
     }
 
-    const id = ride.id;
-    if (__DEV__) {
-      console.log(`${LOG} subscribe`, id);
-    }
-    setRealtimeError(null);
-    removeChannel();
+    const id = rid;
+    let cancelled = false;
 
-    const channel = supabase
-      .channel(`ride:${id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'rides',
-          filter: `id=eq.${id}`,
-        },
-        (payload) => {
-          const raw = payload.new as Record<string, unknown>;
-          setRide((prev) => {
-            const next = buildRideSnapshot(raw, prev);
-            if (!next) {
-              if (__DEV__) {
-                console.warn(`${LOG} update`, 'unmapped payload');
+    void (async () => {
+      const authed = await syncRealtimeAuth();
+      if (cancelled) {
+        return;
+      }
+      if (!authed) {
+        setRealtimeError(
+          'Temps réel : session indisponible. Reconnectez-vous ou rafraîchissez l’application.'
+        );
+        return;
+      }
+
+      if (__DEV__) {
+        console.log(`${LOG} subscribe`, id);
+      }
+      setRealtimeError(null);
+      removeChannel();
+      if (cancelled) {
+        return;
+      }
+
+      // Pas de `filter` côté serveur : Realtime renvoie des bindings qui doivent
+      // matcher exactement le client ; un écart (ex. normalisation UUID) déclenche
+      // CHANNEL_ERROR « mismatch between server and client bindings ». RLS limite
+      // déjà les lignes visibles ; on filtre par `id` dans le callback.
+      const channel = supabase
+        .channel(`ride:${id}`)
+        .on(
+          'postgres_changes',
+          {
+            event: 'UPDATE',
+            schema: 'public',
+            table: 'rides',
+          },
+          (payload) => {
+            const raw = payload.new as Record<string, unknown>;
+            if (typeof raw.id !== 'string' || raw.id !== id) {
+              return;
+            }
+            setRide((prev) => {
+              const next = buildRideSnapshot(raw, prev);
+              if (!next) {
+                if (__DEV__) {
+                  console.warn(`${LOG} update`, 'unmapped payload');
+                }
+                return prev;
               }
-              return prev;
-            }
-            if (__DEV__) {
-              console.log(`${LOG} update`, next.status);
-            }
-            if (isTerminalStatus(next.status)) {
-              queueMicrotask(() => {
-                removeChannel();
-                scheduleTerminalDismiss();
-              });
-            }
-            return next;
-          });
-        }
-      )
-      .subscribe((status, err) => {
-        if (status === 'SUBSCRIBED') {
-          return;
-        }
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          const msg =
-            err?.message ??
-            (status === 'TIMED_OUT'
-              ? 'Temps réel : délai dépassé. Vérifiez la connexion ou l’activation Realtime sur la table rides.'
-              : 'Temps réel indisponible. Vérifiez que la table rides est publiée pour Realtime.');
-          if (__DEV__) {
-            console.error(`${LOG} error`, 'subscribe', status, msg);
+              if (__DEV__) {
+                console.log(`${LOG} update`, next.status);
+              }
+              if (isTerminalStatus(next.status)) {
+                queueMicrotask(() => {
+                  removeChannel();
+                  scheduleTerminalDismiss();
+                });
+              }
+              return next;
+            });
           }
-          setRealtimeError(msg);
-        }
-      });
+        )
+        .subscribe((status, err) => {
+          if (status === 'SUBSCRIBED') {
+            return;
+          }
+          if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            const detail = err?.message?.trim();
+            const msg =
+              detail ||
+              (status === 'TIMED_OUT'
+                ? 'Temps réel : délai dépassé. Vérifiez la connexion ou l’activation Realtime sur la table rides.'
+                : 'Temps réel indisponible. Vérifiez que la table rides est publiée pour Realtime.');
+            if (__DEV__) {
+              console.error(`${LOG} error`, 'subscribe', status, msg);
+            }
+            setRealtimeError(msg);
+          }
+        });
 
-    channelRef.current = channel;
+      if (cancelled) {
+        void supabase.removeChannel(channel);
+        return;
+      }
+      channelRef.current = channel;
+    })();
 
     return () => {
+      cancelled = true;
       removeChannel();
     };
-    // id+status seuls (éviter re-subscribe à chaque patch Realtime)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ride?.id, ride?.status, removeChannel, scheduleTerminalDismiss]);
+    // Objet `ride` exclu : chaque patch Realtime recrée le snapshot → boucle de resubscribe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- ride?.id suffit pour cibler la course.
+  }, [ride?.id, removeChannel, scheduleTerminalDismiss]);
 
   const registerRideAfterCreate = useCallback(
     async (rideId: string) => {
