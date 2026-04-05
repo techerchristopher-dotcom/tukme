@@ -3,6 +3,7 @@
     "name": "tukme",
     "slug": "tukme",
     "version": "1.0.0",
+    "scheme": "tukme",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -13,6 +14,13 @@
         {
           "locationWhenInUsePermission": "Tukme utilise votre position pour afficher la carte autour de vous.",
           "locationAlwaysAndWhenInUsePermission": "Tukme utilise votre position pour afficher la carte autour de vous."
+        }
+      ],
+      [
+        "@stripe/stripe-react-native",
+        {
+          "merchantIdentifier": "merchant.com.tukme.app",
+          "enableGooglePay": false
         }
       ]
     ],

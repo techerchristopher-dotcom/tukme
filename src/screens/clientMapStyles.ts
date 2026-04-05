@@ -1,0 +1,96 @@
+import { StyleSheet } from 'react-native';
+
+export const clientMapStyles = StyleSheet.create({
+  mapWrapper: {
+    width: '100%',
+    maxWidth: 400,
+    marginBottom: 20,
+  },
+  mapTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#0f172a',
+    marginBottom: 6,
+    alignSelf: 'flex-start',
+  },
+  coords: {
+    fontSize: 13,
+    color: '#64748b',
+    marginBottom: 10,
+    alignSelf: 'flex-start',
+  },
+  map: {
+    width: '100%',
+    height: 260,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  mapPlaceholder: {
+    width: '100%',
+    height: 260,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+  },
+  mapPlaceholderText: {
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  mapRouteRow: {
+    marginTop: 10,
+    minHeight: 22,
+  },
+  mapRouteLoading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  mapRouteMuted: {
+    fontSize: 13,
+    color: '#64748b',
+  },
+  mapRouteStats: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0f766e',
+  },
+  mapRouteError: {
+    fontSize: 12,
+    color: '#b45309',
+    lineHeight: 18,
+  },
+  mapSlot: {
+    width: '100%',
+    maxWidth: 400,
+    minHeight: 160,
+    marginBottom: 20,
+    padding: 20,
+    borderRadius: 12,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mapHint: {
+    marginTop: 12,
+    fontSize: 14,
+    color: '#64748b',
+    textAlign: 'center',
+  },
+  mapError: {
+    fontSize: 14,
+    color: '#b91c1c',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+});

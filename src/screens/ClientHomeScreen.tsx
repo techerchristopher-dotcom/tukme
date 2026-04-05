@@ -1,5 +1,10 @@
 import type { Session } from '@supabase/supabase-js';
 import * as Location from 'expo-location';
+import { ClientMapBlock } from './ClientMapBlock';
+import {
+  ClientStripeRoot,
+  useClientStripeSheet,
+} from './ClientHomeStripeBridge';
 import {
   type ReactNode,
   useEffect,
@@ -10,14 +15,13 @@ import {
 import {
   ActivityIndicator,
   Keyboard,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
-import type { Region } from 'react-native-maps';
-
 import { SignedInShell } from '../components/SignedInShell';
 import {
   type ClientLocationState,
@@ -38,13 +42,17 @@ import {
   cancelRideAsClient,
   CancelRideError,
 } from '../lib/cancelRide';
+import { invokeCreatePaymentIntent } from '../lib/createPaymentIntent';
 import { insertRequestedRide } from '../lib/createRide';
+import { syncRidePaymentExpiryIfDue } from '../lib/syncRidePaymentExpiry';
 import { useActiveRide } from '../hooks/useActiveRide';
-import type { ClientRideStatus } from '../types/clientRide';
 import { formatAriary } from '../lib/taxiPricing';
+import type { ClientRideStatus } from '../types/clientRide';
 import type { ClientDestination } from '../types/clientDestination';
 import type { RidePricingEstimate } from '../types/ridePricing';
 import type { Profile } from '../types/profile';
+
+const RIDE_RT_LOG = '[ride-realtime]';
 
 type Props = {
   session: Session;
@@ -52,12 +60,23 @@ type Props = {
   onDevResetRole: () => Promise<void>;
 };
 
+/** Retour 3DS / wallets — aligné sur app.json expo.scheme */
+const STRIPE_RETURN_URL = 'tukme://stripe-redirect';
+
 function clientRideStatusMessage(status: ClientRideStatus): string {
   switch (status) {
     case 'requested':
       return 'Demande envoyée — recherche d’un chauffeur.';
+    case 'awaiting_payment':
+      return 'Chauffeur trouvé — paiement requis.';
+    case 'paid':
+      return 'Chauffeur prêt.';
+    case 'en_route':
+      return 'Chauffeur en route.';
+    case 'arrived':
+      return 'Chauffeur arrivé.';
     case 'accepted':
-      return 'Chauffeur trouvé.';
+      return 'Chauffeur trouvé — paiement requis.';
     case 'in_progress':
       return 'Course en cours.';
     case 'completed':
@@ -67,7 +86,7 @@ function clientRideStatusMessage(status: ClientRideStatus): string {
     case 'cancelled_by_driver':
       return 'Course annulée par le chauffeur.';
     case 'expired':
-      return 'Demande expirée.';
+      return 'Paiement expiré.';
     default:
       return 'État de la course mis à jour.';
   }
@@ -81,38 +100,6 @@ function formatCurrentPositionText(location: ClientLocationState): string {
     return 'Non disponible';
   }
   return `${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}`;
-}
-
-function regionIncludingBoth(
-  originLat: number,
-  originLng: number,
-  dest: ClientDestination | null
-): Region {
-  if (!dest) {
-    return {
-      latitude: originLat,
-      longitude: originLng,
-      latitudeDelta: 0.012,
-      longitudeDelta: 0.012,
-    };
-  }
-
-  const minLat = Math.min(originLat, dest.latitude);
-  const maxLat = Math.max(originLat, dest.latitude);
-  const minLng = Math.min(originLng, dest.longitude);
-  const maxLng = Math.max(originLng, dest.longitude);
-
-  const midLat = (minLat + maxLat) / 2;
-  const midLng = (minLng + maxLng) / 2;
-  const rawLatDelta = (maxLat - minLat) * 1.6;
-  const rawLngDelta = (maxLng - minLng) * 1.6;
-
-  return {
-    latitude: midLat,
-    longitude: midLng,
-    latitudeDelta: Math.max(rawLatDelta, 0.025),
-    longitudeDelta: Math.max(rawLngDelta, 0.025),
-  };
 }
 
 function TripSummaryCard(props: {
@@ -149,129 +136,6 @@ function TripSummaryCard(props: {
         Destination
       </Text>
       {destinationBlock}
-    </View>
-  );
-}
-
-function ClientMapBlock(props: {
-  location: ClientLocationState;
-  destination: ClientDestination | null;
-  routeMetrics: ReturnType<typeof useRouteMetrics>;
-}) {
-  const { location, destination, routeMetrics } = props;
-
-  const mapRef = useRef<InstanceType<
-    typeof import('react-native-maps').default
-  > | null>(null);
-
-  useEffect(() => {
-    if (location.phase !== 'ready') {
-      return;
-    }
-    if (
-      !destination ||
-      !routeMetrics.polylineCoordinates ||
-      routeMetrics.polylineCoordinates.length < 2
-    ) {
-      return;
-    }
-    const id = requestAnimationFrame(() => {
-      mapRef.current?.fitToCoordinates(routeMetrics.polylineCoordinates!, {
-        edgePadding: { top: 52, right: 36, bottom: 88, left: 36 },
-        animated: true,
-      });
-    });
-    return () => cancelAnimationFrame(id);
-  }, [location.phase, destination, routeMetrics.polylineCoordinates]);
-
-  if (location.phase === 'loading') {
-    return (
-      <View style={styles.mapSlot}>
-        <ActivityIndicator size="large" color="#0f766e" />
-        <Text style={styles.mapHint}>Recherche de votre position…</Text>
-      </View>
-    );
-  }
-
-  if (location.phase === 'denied' || location.phase === 'error') {
-    return (
-      <View style={styles.mapSlot}>
-        <Text style={styles.mapError}>{location.message}</Text>
-      </View>
-    );
-  }
-
-  const { latitude, longitude } = location;
-  const region = regionIncludingBoth(latitude, longitude, destination);
-
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const Maps = require('react-native-maps') as typeof import('react-native-maps');
-  const MapView = Maps.default;
-  const Marker = Maps.Marker;
-  const Polyline = Maps.Polyline;
-
-  const mapTitle = destination
-    ? 'Carte — départ et destination'
-    : 'Carte — votre position';
-
-  return (
-    <View style={styles.mapWrapper}>
-      <Text style={styles.mapTitle}>{mapTitle}</Text>
-      <Text style={styles.coords}>
-        Vous : {latitude.toFixed(5)}, {longitude.toFixed(5)}
-        {destination
-          ? `\nDestination : ${destination.latitude.toFixed(5)}, ${destination.longitude.toFixed(5)}`
-          : ''}
-      </Text>
-      <MapView
-        ref={mapRef}
-        style={styles.map}
-        initialRegion={region}
-        showsCompass
-      >
-        <Marker coordinate={{ latitude, longitude }} title="Vous êtes ici" />
-        {destination ? (
-          <Marker
-            coordinate={{
-              latitude: destination.latitude,
-              longitude: destination.longitude,
-            }}
-            title="Destination"
-            description={destination.label}
-            pinColor="#b45309"
-          />
-        ) : null}
-        {routeMetrics.polylineCoordinates &&
-        routeMetrics.polylineCoordinates.length >= 2 ? (
-          <Polyline
-            coordinates={routeMetrics.polylineCoordinates}
-            strokeColor="#0f766e"
-            strokeWidth={5}
-            lineJoin="round"
-            lineCap="round"
-          />
-        ) : null}
-      </MapView>
-      {destination ? (
-        <View style={styles.mapRouteRow}>
-          {routeMetrics.loading ? (
-            <View style={styles.mapRouteLoading}>
-              <ActivityIndicator size="small" color="#0f766e" />
-              <Text style={styles.mapRouteMuted}>Calcul de l’itinéraire…</Text>
-            </View>
-          ) : routeMetrics.error ? (
-            <Text style={styles.mapRouteError} numberOfLines={3}>
-              Itinéraire : {routeMetrics.error}
-            </Text>
-          ) : routeMetrics.distanceKm != null &&
-            routeMetrics.durationMinutes != null ? (
-            <Text style={styles.mapRouteStats}>
-              Environ {routeMetrics.distanceKm.toLocaleString('fr-FR')} km ·{' '}
-              {routeMetrics.durationMinutes} min
-            </Text>
-          ) : null}
-        </View>
-      ) : null}
     </View>
   );
 }
@@ -453,8 +317,12 @@ function PlacesDestinationSection(props: {
   );
 }
 
-function ClientHomeMiddleContent(props: { userId: string }) {
-  const { userId } = props;
+function ClientHomeMiddleContent(props: {
+  userId: string;
+  stripePublishableConfigured: boolean;
+}) {
+  const { userId, stripePublishableConfigured } = props;
+  const { initPaymentSheet, presentPaymentSheet } = useClientStripeSheet();
   const {
     ride,
     fetchLoading: rideFetchLoading,
@@ -463,6 +331,7 @@ function ClientHomeMiddleContent(props: { userId: string }) {
     hasOpenRide,
     registerRideAfterCreate,
     dismissRide,
+    refetchOpenRide,
   } = useActiveRide(userId);
   const location = useClientLocation();
   const [searchInput, setSearchInput] = useState('');
@@ -480,6 +349,121 @@ function ClientHomeMiddleContent(props: { userId: string }) {
   /** Bloque les double clics avant le prochain rendu (setState asynchrone). */
   const orderRequestInFlightRef = useRef(false);
   const cancelRequestInFlightRef = useRef(false);
+  const paymentInFlightRef = useRef(false);
+  const searchHydratedForRideIdRef = useRef<string | null>(null);
+  const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [paymentSheetLoading, setPaymentSheetLoading] = useState(false);
+  /** Après succès Payment Sheet : attente webhook → statut `paid` (Realtime). */
+  const [paymentConfirmPending, setPaymentConfirmPending] = useState(false);
+  /** Horloge pour le compte à rebours (alignée sur `payment_expires_at` serveur). */
+  const [payClock, setPayClock] = useState(() => Date.now());
+  const paymentExpirySyncDoneRef = useRef<string | null>(null);
+
+  const destinationForUi = useMemo((): ClientDestination | null => {
+    if (structuredDestination) {
+      return structuredDestination;
+    }
+    if (
+      ride &&
+      Number.isFinite(ride.destination_lat) &&
+      Number.isFinite(ride.destination_lng)
+    ) {
+      const label =
+        ride.destination_label?.trim() || 'Destination enregistrée';
+      if (__DEV__) {
+        console.log(`${RIDE_RT_LOG} structuredDestination missing`);
+        console.log(`${RIDE_RT_LOG} destination from active ride`, label);
+        console.log(`${RIDE_RT_LOG} UI using active ride fallback`);
+      }
+      return {
+        label,
+        latitude: ride.destination_lat,
+        longitude: ride.destination_lng,
+        placeId: ride.destination_place_id ?? undefined,
+      };
+    }
+    return null;
+  }, [structuredDestination, ride]);
+
+  useEffect(() => {
+    if (!ride || !hasOpenRide) {
+      searchHydratedForRideIdRef.current = null;
+      return;
+    }
+    if (structuredDestination) {
+      return;
+    }
+    if (!ride.destination_label?.trim()) {
+      return;
+    }
+    if (searchHydratedForRideIdRef.current === ride.id) {
+      return;
+    }
+    setSearchInput(ride.destination_label);
+    setSuggestionsSuspended(true);
+    searchHydratedForRideIdRef.current = ride.id;
+    if (__DEV__) {
+      console.log(`${RIDE_RT_LOG} hydrate search from ride`, ride.id);
+    }
+  }, [ride, hasOpenRide, structuredDestination]);
+
+  useEffect(() => {
+    if (ride?.status === 'paid') {
+      setPaymentConfirmPending(false);
+      setPaymentSheetLoading(false);
+    }
+  }, [ride?.status]);
+
+  useEffect(() => {
+    if (ride?.status !== 'awaiting_payment') {
+      paymentExpirySyncDoneRef.current = null;
+    }
+  }, [ride?.status]);
+
+  useEffect(() => {
+    if (ride?.status !== 'awaiting_payment' || !ride.payment_expires_at) {
+      return;
+    }
+    setPayClock(Date.now());
+    const id = setInterval(() => {
+      setPayClock(Date.now());
+    }, 1000);
+    return () => clearInterval(id);
+  }, [ride?.status, ride?.payment_expires_at, ride?.id]);
+
+  const paymentDeadlineMs =
+    ride?.status === 'awaiting_payment' && ride.payment_expires_at
+      ? Date.parse(ride.payment_expires_at)
+      : NaN;
+  const paymentWindowExpired =
+    Number.isFinite(paymentDeadlineMs) && payClock >= paymentDeadlineMs;
+  const paymentCountdownMmSs = Number.isFinite(paymentDeadlineMs)
+    ? (() => {
+        const rem = Math.max(
+          0,
+          Math.ceil((paymentDeadlineMs - payClock) / 1000)
+        );
+        const mm = Math.floor(rem / 60);
+        const ss = rem % 60;
+        return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+      })()
+    : null;
+
+  useEffect(() => {
+    if (
+      !ride ||
+      ride.status !== 'awaiting_payment' ||
+      !ride.payment_expires_at ||
+      !paymentWindowExpired
+    ) {
+      return;
+    }
+    if (paymentExpirySyncDoneRef.current === ride.id) {
+      return;
+    }
+    paymentExpirySyncDoneRef.current = ride.id;
+    void syncRidePaymentExpiryIfDue(ride.id);
+  }, [ride?.id, ride?.status, ride?.payment_expires_at, paymentWindowExpired]); // eslint-disable-line react-hooks/exhaustive-deps -- ride utilisé sous garde
 
   const pickupLat =
     location.phase === 'ready' ? location.latitude : null;
@@ -531,20 +515,20 @@ function ClientHomeMiddleContent(props: { userId: string }) {
     pickupLat,
     pickupLng,
     pickupLabel,
-    destination: structuredDestination,
+    destination: destinationForUi,
   });
 
   const routeMetrics = useRouteMetrics({
     originLat: pickupLat,
     originLng: pickupLng,
-    destination: structuredDestination,
+    destination: destinationForUi,
   });
 
   const canOrder = useMemo(() => {
     if (!userId.trim()) {
       return false;
     }
-    if (!structuredDestination) {
+    if (!destinationForUi) {
       return false;
     }
     if (pickupLat == null || pickupLng == null) {
@@ -565,7 +549,7 @@ function ClientHomeMiddleContent(props: { userId: string }) {
     return true;
   }, [
     userId,
-    structuredDestination,
+    destinationForUi,
     pickupLat,
     pickupLng,
     ridePricing,
@@ -597,7 +581,7 @@ function ClientHomeMiddleContent(props: { userId: string }) {
   async function handleOrderPress() {
     if (
       !canOrder ||
-      !structuredDestination ||
+      !destinationForUi ||
       pickupLat == null ||
       pickupLng == null ||
       !ridePricing ||
@@ -642,10 +626,10 @@ function ClientHomeMiddleContent(props: { userId: string }) {
         pickup_lat: pickupLat,
         pickup_lng: pickupLng,
         pickup_label: pickupLabel,
-        destination_lat: structuredDestination.latitude,
-        destination_lng: structuredDestination.longitude,
-        destination_label: structuredDestination.label,
-        destination_place_id: structuredDestination.placeId ?? null,
+        destination_lat: destinationForUi.latitude,
+        destination_lng: destinationForUi.longitude,
+        destination_label: destinationForUi.label,
+        destination_place_id: destinationForUi.placeId ?? null,
         pickup_zone: ridePricing.pickupZone,
         destination_zone: ridePricing.destinationZone,
         estimated_price_ariary: ridePricing.estimatedPriceAriary,
@@ -669,9 +653,11 @@ function ClientHomeMiddleContent(props: { userId: string }) {
 
   async function handleCancelPress() {
     const rideId = ride?.id;
+    const canCancel =
+      ride?.status === 'requested' || ride?.status === 'awaiting_payment';
     if (
       !rideId ||
-      ride?.status !== 'requested' ||
+      !canCancel ||
       cancelLoading ||
       cancelRequestInFlightRef.current
     ) {
@@ -701,6 +687,79 @@ function ClientHomeMiddleContent(props: { userId: string }) {
     } finally {
       cancelRequestInFlightRef.current = false;
       setCancelLoading(false);
+    }
+  }
+
+  async function handlePayPress() {
+    if (Platform.OS === 'web') {
+      setPaymentError(
+        'Le paiement sécurisé est disponible sur l’application mobile (iOS/Android), pas dans le navigateur.'
+      );
+      return;
+    }
+    if (
+      !ride ||
+      ride.status !== 'awaiting_payment' ||
+      paymentInFlightRef.current ||
+      paymentSheetLoading
+    ) {
+      return;
+    }
+    const rideId = ride.id;
+    if (!stripePublishableConfigured) {
+      setPaymentError(
+        'Ajoutez EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY dans .env (clé publishable Stripe).'
+      );
+      return;
+    }
+
+    const deadline = ride.payment_expires_at
+      ? Date.parse(ride.payment_expires_at)
+      : NaN;
+    if (Number.isFinite(deadline) && Date.now() >= deadline) {
+      setPaymentError('Le délai de paiement est dépassé.');
+      void syncRidePaymentExpiryIfDue(rideId);
+      return;
+    }
+
+    paymentInFlightRef.current = true;
+    setPaymentError(null);
+    setPaymentSheetLoading(true);
+
+    try {
+      const pi = await invokeCreatePaymentIntent(rideId);
+      if (!pi.ok) {
+        setPaymentError(pi.message);
+        return;
+      }
+
+      const { error: initErr } = await initPaymentSheet({
+        merchantDisplayName: 'Tukme',
+        paymentIntentClientSecret: pi.clientSecret,
+        returnURL: STRIPE_RETURN_URL,
+      });
+
+      if (initErr) {
+        setPaymentError(initErr.message);
+        return;
+      }
+
+      const { error: presentErr } = await presentPaymentSheet();
+
+      if (presentErr) {
+        if (presentErr.code === 'Canceled') {
+          setPaymentError(null);
+        } else {
+          setPaymentError(presentErr.message);
+        }
+        return;
+      }
+
+      setPaymentConfirmPending(true);
+      void refetchOpenRide();
+    } finally {
+      paymentInFlightRef.current = false;
+      setPaymentSheetLoading(false);
     }
   }
 
@@ -747,16 +806,16 @@ function ClientHomeMiddleContent(props: { userId: string }) {
     <>
       <TripSummaryCard
         location={location}
-        destination={structuredDestination}
+        destination={destinationForUi}
       />
       <ClientMapBlock
         location={location}
-        destination={structuredDestination}
+        destination={destinationForUi}
         routeMetrics={routeMetrics}
       />
       <ZonePricingCard
         estimate={ridePricing}
-        hasDestination={structuredDestination !== null}
+        hasDestination={destinationForUi !== null}
       />
       {structuredDestination || ride != null ? (
         <View style={styles.orderBlock}>
@@ -793,11 +852,10 @@ function ClientHomeMiddleContent(props: { userId: string }) {
               )}
             </Pressable>
           ) : null}
-          {!structuredDestination && ride != null ? (
+          {!destinationForUi && ride != null ? (
             <Text style={styles.orderHint}>
-              Une course est en cours. Saisissez une destination pour préparer
-              une prochaine commande après la fin de celle-ci, ou attendez la
-              mise à jour du statut.
+              Une course est en cours sans destination affichable. Vérifiez la
+              connexion ou contactez le support.
             </Text>
           ) : null}
           {!canOrder &&
@@ -827,6 +885,10 @@ function ClientHomeMiddleContent(props: { userId: string }) {
             <Text
               style={
                 ride.status === 'requested' ||
+                ride.status === 'awaiting_payment' ||
+                ride.status === 'paid' ||
+                ride.status === 'en_route' ||
+                ride.status === 'arrived' ||
                 ride.status === 'accepted' ||
                 ride.status === 'in_progress'
                   ? styles.orderSuccess
@@ -839,7 +901,56 @@ function ClientHomeMiddleContent(props: { userId: string }) {
           {rideRealtimeError ? (
             <Text style={styles.orderRealtimeWarning}>{rideRealtimeError}</Text>
           ) : null}
-          {ride?.status === 'requested' ? (
+          {paymentConfirmPending && ride?.status === 'awaiting_payment' ? (
+            <Text style={styles.orderHint}>
+              Validation du paiement en cours…
+            </Text>
+          ) : null}
+          {ride?.status === 'awaiting_payment' && ride.payment_expires_at ? (
+            <Text style={styles.orderPaymentTimer}>
+              {paymentWindowExpired
+                ? 'Délai de paiement dépassé — mise à jour…'
+                : `Paiement requis — expire dans ${paymentCountdownMmSs ?? '--:--'}`}
+            </Text>
+          ) : null}
+          {ride?.status === 'awaiting_payment' &&
+          (!ride.payment_expires_at || !paymentWindowExpired) ? (
+            Platform.OS === 'web' ? (
+              <Text style={styles.orderHint}>
+                Le paiement sécurisé est disponible sur l’application mobile
+                (iOS/Android), pas dans le navigateur.
+              </Text>
+            ) : (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.orderPayButton,
+                  paymentSheetLoading && styles.orderButtonDisabled,
+                  pressed &&
+                    !paymentSheetLoading &&
+                    styles.orderPayButtonPressed,
+                ]}
+                disabled={paymentSheetLoading}
+                onPress={() => void handlePayPress()}
+              >
+                {paymentSheetLoading ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.orderPayButtonLabel}>
+                    Payer
+                    {ride.estimated_price_eur != null &&
+                    Number.isFinite(ride.estimated_price_eur)
+                      ? ` (${ride.estimated_price_eur.toFixed(2)} €)`
+                      : ''}
+                  </Text>
+                )}
+              </Pressable>
+            )
+          ) : null}
+          {paymentError ? (
+            <Text style={styles.orderError}>{paymentError}</Text>
+          ) : null}
+          {ride?.status === 'requested' ||
+          ride?.status === 'awaiting_payment' ? (
             <Pressable
               style={({ pressed }) => [
                 styles.orderCancelButton,
@@ -884,16 +995,27 @@ export function ClientHomeScreen({
   profile,
   onDevResetRole,
 }: Props) {
+  const stripePk = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY?.trim() ?? '';
+  const stripePublishableConfigured = stripePk.length > 0;
+  const stripePublishableKey =
+    stripePk ||
+    'pk_test_0000000000000000000000000000000000000000000000000000000000000000';
+
   return (
-    <SignedInShell
-      session={session}
-      profile={profile}
-      headline="Espace client"
-      onDevResetRole={onDevResetRole}
-      middleContent={
-        <ClientHomeMiddleContent userId={session.user.id} />
-      }
-    />
+    <ClientStripeRoot publishableKey={stripePublishableKey}>
+      <SignedInShell
+        session={session}
+        profile={profile}
+        headline="Espace client"
+        onDevResetRole={onDevResetRole}
+        middleContent={
+          <ClientHomeMiddleContent
+            userId={session.user.id}
+            stripePublishableConfigured={stripePublishableConfigured}
+          />
+        }
+      />
+    </ClientStripeRoot>
   );
 }
 
@@ -935,80 +1057,6 @@ const styles = StyleSheet.create({
     color: '#64748b',
     marginTop: 4,
     fontVariant: ['tabular-nums'],
-  },
-  mapWrapper: {
-    width: '100%',
-    maxWidth: 400,
-    marginBottom: 20,
-  },
-  mapTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#0f172a',
-    marginBottom: 6,
-    alignSelf: 'flex-start',
-  },
-  coords: {
-    fontSize: 13,
-    color: '#64748b',
-    marginBottom: 10,
-    alignSelf: 'flex-start',
-  },
-  map: {
-    width: '100%',
-    height: 260,
-    borderRadius: 12,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-  },
-  mapRouteRow: {
-    marginTop: 10,
-    minHeight: 22,
-  },
-  mapRouteLoading: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  mapRouteMuted: {
-    fontSize: 13,
-    color: '#64748b',
-  },
-  mapRouteStats: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#0f766e',
-  },
-  mapRouteError: {
-    fontSize: 12,
-    color: '#b45309',
-    lineHeight: 18,
-  },
-  mapSlot: {
-    width: '100%',
-    maxWidth: 400,
-    minHeight: 160,
-    marginBottom: 20,
-    padding: 20,
-    borderRadius: 12,
-    backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  mapHint: {
-    marginTop: 12,
-    fontSize: 14,
-    color: '#64748b',
-    textAlign: 'center',
-  },
-  mapError: {
-    fontSize: 14,
-    color: '#b91c1c',
-    textAlign: 'center',
-    lineHeight: 20,
   },
   destinationBlock: {
     width: '100%',
@@ -1228,6 +1276,30 @@ const styles = StyleSheet.create({
     marginTop: 10,
     fontSize: 14,
     color: '#b91c1c',
+    lineHeight: 20,
+  },
+  orderPayButton: {
+    marginTop: 12,
+    backgroundColor: '#0f766e',
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 48,
+  },
+  orderPayButtonPressed: {
+    opacity: 0.92,
+  },
+  orderPayButtonLabel: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  orderPaymentTimer: {
+    marginTop: 8,
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#b45309',
     lineHeight: 20,
   },
   orderCancelButton: {

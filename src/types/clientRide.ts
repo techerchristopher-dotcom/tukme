@@ -1,6 +1,11 @@
 /** Statuts `public.ride_status` (aligné schéma Supabase). */
 export type ClientRideStatus =
   | 'requested'
+  | 'awaiting_payment'
+  | 'paid'
+  | 'en_route'
+  | 'arrived'
+  /** Conservé pour anciennes lignes / enum DB ; ne plus utiliser côté app. */
   | 'accepted'
   | 'in_progress'
   | 'completed'
@@ -8,10 +13,21 @@ export type ClientRideStatus =
   | 'cancelled_by_driver'
   | 'expired';
 
-/** Données minimales pour suivi client + Realtime. */
+/**
+ * Snapshot ride côté client (fetch + Realtime).
+ * Inclut la destination persistée en base pour réhydrater l’UI après reload.
+ */
 export type ClientRideSnapshot = {
   id: string;
   status: ClientRideStatus;
   driver_id: string | null;
   updated_at: string;
+  destination_label: string;
+  destination_lat: number;
+  destination_lng: number;
+  destination_place_id: string | null;
+  /** Estimation EUR persistée (paiement Edge Function). */
+  estimated_price_eur: number | null;
+  /** Fin de fenêtre de paiement (UTC, ISO) ; défini une seule fois côté serveur. */
+  payment_expires_at: string | null;
 };

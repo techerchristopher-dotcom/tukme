@@ -7,6 +7,8 @@ const USER: Record<string, string> = {
   CANCEL_RIDE_FORBIDDEN: 'Vous ne pouvez pas annuler cette course.',
   CANCEL_RIDE_NOT_REQUESTED:
     'Cette course ne peut plus être annulée (déjà prise en charge ou terminée).',
+  CANCEL_RIDE_NOT_ALLOWED:
+    'Annulation impossible : la course est déjà payée ou en cours.',
 };
 
 /** Erreurs métier : débloquer l’UI locale (ride plus annulable / plus la vôtre). */
@@ -28,6 +30,9 @@ export class CancelRideError extends Error {
 
 function parseRpcFailure(error: { message?: string }): CancelRideError {
   const raw = error.message ?? '';
+  if (raw.includes('CANCEL_RIDE_NOT_ALLOWED')) {
+    return new CancelRideError(USER.CANCEL_RIDE_NOT_ALLOWED, false);
+  }
   for (const code of CLEAR_PENDING_CODES) {
     if (raw.includes(code)) {
       return new CancelRideError(USER[code] ?? raw, true);

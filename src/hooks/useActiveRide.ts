@@ -5,8 +5,15 @@ import type { ClientRideSnapshot, ClientRideStatus } from '../types/clientRide';
 
 const LOG = '[ride-realtime]';
 
+const RIDE_SELECT_COLUMNS =
+  'id, status, driver_id, updated_at, destination_label, destination_lat, destination_lng, destination_place_id, estimated_price_eur, payment_expires_at';
+
 const OPEN_STATUSES: ClientRideStatus[] = [
   'requested',
+  'awaiting_payment',
+  'paid',
+  'en_route',
+  'arrived',
   'accepted',
   'in_progress',
 ];
@@ -28,21 +35,103 @@ function isTerminalStatus(s: ClientRideStatus): boolean {
   return TERMINAL_STATUSES.includes(s);
 }
 
-function mapRow(row: Record<string, unknown>): ClientRideSnapshot | null {
-  const id = row.id;
-  const status = row.status;
-  const updated_at = row.updated_at;
-  if (typeof id !== 'string' || typeof status !== 'string' || typeof updated_at !== 'string') {
+function num(v: unknown): number | undefined {
+  if (typeof v === 'number' && Number.isFinite(v)) {
+    return v;
+  }
+  if (typeof v === 'string') {
+    const n = Number.parseFloat(v);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Construit un snapshot à partir d’une ligne (fetch complet ou merge Realtime).
+ * Les champs absents de `row` sont repris sur `prev` pour ne pas perdre la destination sur un patch partiel.
+ */
+function buildRideSnapshot(
+  row: Record<string, unknown>,
+  prev: ClientRideSnapshot | null
+): ClientRideSnapshot | null {
+  const id =
+    typeof row.id === 'string' ? row.id : prev?.id;
+  const statusRaw = row.status;
+  const status =
+    typeof statusRaw === 'string'
+      ? (statusRaw as ClientRideStatus)
+      : prev?.status;
+  const updated_at =
+    typeof row.updated_at === 'string' ? row.updated_at : prev?.updated_at;
+
+  if (!id || !status || !updated_at) {
     return null;
   }
+
   const driverRaw = row.driver_id;
-  const driver_id =
-    driverRaw === null || typeof driverRaw === 'string' ? (driverRaw as string | null) : null;
+  let driver_id: string | null;
+  if (driverRaw === undefined) {
+    driver_id = prev?.driver_id ?? null;
+  } else if (driverRaw === null || typeof driverRaw === 'string') {
+    driver_id = driverRaw;
+  } else {
+    driver_id = prev?.driver_id ?? null;
+  }
+
+  const destLabel =
+    typeof row.destination_label === 'string'
+      ? row.destination_label
+      : prev?.destination_label ?? '';
+  const destLat = num(row.destination_lat) ?? prev?.destination_lat;
+  const destLng = num(row.destination_lng) ?? prev?.destination_lng;
+  const destPlace =
+    row.destination_place_id === undefined
+      ? (prev?.destination_place_id ?? null)
+      : row.destination_place_id === null ||
+          typeof row.destination_place_id === 'string'
+        ? (row.destination_place_id as string | null)
+        : prev?.destination_place_id ?? null;
+
+  let estimated_price_eur: number | null;
+  if (row.estimated_price_eur === undefined) {
+    estimated_price_eur = prev?.estimated_price_eur ?? null;
+  } else if (row.estimated_price_eur === null) {
+    estimated_price_eur = null;
+  } else {
+    const pe = num(row.estimated_price_eur);
+    estimated_price_eur = pe ?? null;
+  }
+
+  let payment_expires_at: string | null;
+  if (row.payment_expires_at === undefined) {
+    payment_expires_at = prev?.payment_expires_at ?? null;
+  } else if (
+    row.payment_expires_at === null ||
+    typeof row.payment_expires_at === 'string'
+  ) {
+    payment_expires_at = row.payment_expires_at as string | null;
+  } else {
+    payment_expires_at = prev?.payment_expires_at ?? null;
+  }
+
+  if (destLat === undefined || destLng === undefined) {
+    if (__DEV__ && prev) {
+      console.warn(`${LOG} merge`, 'missing destination coords, keeping partial');
+    }
+    return null;
+  }
+
   return {
     id,
-    status: status as ClientRideStatus,
+    status,
     driver_id,
     updated_at,
+    destination_label: destLabel,
+    destination_lat: destLat,
+    destination_lng: destLng,
+    destination_place_id: destPlace,
+    estimated_price_eur,
+    payment_expires_at,
   };
 }
 
@@ -100,7 +189,7 @@ export function useActiveRide(userId: string) {
 
     const { data, error } = await supabase
       .from('rides')
-      .select('id, status, driver_id, updated_at')
+      .select(RIDE_SELECT_COLUMNS)
       .in('status', OPEN_STATUSES)
       .order('created_at', { ascending: false })
       .limit(1)
@@ -119,7 +208,18 @@ export function useActiveRide(userId: string) {
     }
 
     const row = data as Record<string, unknown> | null;
-    const snap = row ? mapRow(row) : null;
+    if (__DEV__) {
+      console.log(`${LOG} initial fetch ride data`, row ? JSON.stringify(row) : 'null');
+    }
+
+    const snap = row ? buildRideSnapshot(row, null) : null;
+    if (__DEV__) {
+      if (snap) {
+        console.log(`${LOG} hydrated ride`, snap.id, snap.status);
+      } else if (row) {
+        console.warn(`${LOG} hydrated ride`, 'failed to map row');
+      }
+    }
     setRide(snap);
     setFetchLoading(false);
   }, [userId]);
@@ -159,21 +259,26 @@ export function useActiveRide(userId: string) {
           filter: `id=eq.${id}`,
         },
         (payload) => {
-          const next = mapRow(payload.new as Record<string, unknown>);
-          if (!next) {
-            if (__DEV__) {
-              console.warn(`${LOG} update`, 'unmapped payload');
+          const raw = payload.new as Record<string, unknown>;
+          setRide((prev) => {
+            const next = buildRideSnapshot(raw, prev);
+            if (!next) {
+              if (__DEV__) {
+                console.warn(`${LOG} update`, 'unmapped payload');
+              }
+              return prev;
             }
-            return;
-          }
-          if (__DEV__) {
-            console.log(`${LOG} update`, next.status);
-          }
-          setRide(next);
-          if (isTerminalStatus(next.status)) {
-            removeChannel();
-            scheduleTerminalDismiss();
-          }
+            if (__DEV__) {
+              console.log(`${LOG} update`, next.status);
+            }
+            if (isTerminalStatus(next.status)) {
+              queueMicrotask(() => {
+                removeChannel();
+                scheduleTerminalDismiss();
+              });
+            }
+            return next;
+          });
         }
       )
       .subscribe((status, err) => {
@@ -198,6 +303,8 @@ export function useActiveRide(userId: string) {
     return () => {
       removeChannel();
     };
+    // id+status seuls (éviter re-subscribe à chaque patch Realtime)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ride?.id, ride?.status, removeChannel, scheduleTerminalDismiss]);
 
   const registerRideAfterCreate = useCallback(
@@ -207,7 +314,7 @@ export function useActiveRide(userId: string) {
       }
       const { data, error } = await supabase
         .from('rides')
-        .select('id, status, driver_id, updated_at')
+        .select(RIDE_SELECT_COLUMNS)
         .eq('id', rideId)
         .maybeSingle();
 
@@ -215,28 +322,21 @@ export function useActiveRide(userId: string) {
         if (__DEV__) {
           console.error(`${LOG} error`, 'afterCreate', error.message);
         }
-        setRide({
-          id: rideId,
-          status: 'requested',
-          driver_id: null,
-          updated_at: new Date().toISOString(),
-        });
+        await fetchOpenRide();
         return;
       }
       const row = data as Record<string, unknown> | null;
-      const snap = row ? mapRow(row) : null;
+      const snap = row ? buildRideSnapshot(row, null) : null;
       if (snap) {
         setRide(snap);
+        if (__DEV__) {
+          console.log(`${LOG} hydrated ride`, 'after create', snap.id);
+        }
       } else {
-        setRide({
-          id: rideId,
-          status: 'requested',
-          driver_id: null,
-          updated_at: new Date().toISOString(),
-        });
+        await fetchOpenRide();
       }
     },
-    []
+    [fetchOpenRide]
   );
 
   /** Après annulation client réussie : pas d’attente Realtime, pas de message terminal prolongé. */
