@@ -22,6 +22,9 @@ function mapRpcError(raw: string): string {
   if (raw.includes('COMPLETE_RIDE_NOT_ALLOWED')) {
     return 'Impossible de terminer la course (elle doit être en cours).';
   }
+  if (raw.includes('OTP_INVALID')) {
+    return 'Code incorrect.';
+  }
   if (
     raw.includes('START_EN_ROUTE_NOT_DRIVER') ||
     raw.includes('MARK_ARRIVED_NOT_DRIVER') ||
@@ -68,6 +71,22 @@ export async function rpcCompleteRide(rideId: string): Promise<void> {
   if (error) {
     if (__DEV__) {
       console.error(`${LOG} complete_ride`, error.message);
+    }
+    throw new DriverRideProgressError(mapRpcError(error.message ?? ''));
+  }
+}
+
+export async function rpcCompleteRideWithOtp(
+  rideId: string,
+  otp: string
+): Promise<void> {
+  const { error } = await supabase.rpc('complete_ride_with_otp', {
+    p_ride_id: rideId,
+    p_otp: otp,
+  });
+  if (error) {
+    if (__DEV__) {
+      console.error(`${LOG} complete_ride_with_otp`, error.message);
     }
     throw new DriverRideProgressError(mapRpcError(error.message ?? ''));
   }

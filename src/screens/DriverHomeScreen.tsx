@@ -5,6 +5,7 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 
@@ -16,7 +17,7 @@ import {
 } from '../lib/driverReleaseRide';
 import {
   DriverRideProgressError,
-  rpcCompleteRide,
+  rpcCompleteRideWithOtp,
   rpcMarkArrived,
   rpcStartEnRoute,
   rpcStartRide,
@@ -88,6 +89,8 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
   const [releasingId, setReleasingId] = useState<string | null>(null);
   const [postPaidActionId, setPostPaidActionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [otpInput, setOtpInput] = useState('');
+  const [otpRideId, setOtpRideId] = useState<string | null>(null);
 
   const fetchMine = useCallback(async () => {
     if (!driverId.trim()) {
@@ -189,14 +192,19 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
     }
   }
 
-  async function handleComplete(rideId: string) {
+  async function handleCompleteWithOtp(rideId: string) {
     if (releasingId || postPaidActionId) {
+      return;
+    }
+    const otp = otpInput.trim();
+    if (!otp || otp.length < 4) {
+      setActionError('Saisissez le code à 4 chiffres.');
       return;
     }
     setActionError(null);
     setPostPaidActionId(rideId);
     try {
-      await rpcCompleteRide(rideId);
+      await rpcCompleteRideWithOtp(rideId, otp);
       void fetchMine();
     } catch (e) {
       setActionError(
@@ -354,21 +362,38 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
             </Pressable>
           ) : null}
           {r.status === 'in_progress' ? (
-            <Pressable
-              style={({ pressed }) => [
-                styles.progressBtn,
-                postPaidActionId && styles.acceptBtnDisabled,
-                pressed && !postPaidActionId && styles.progressBtnPressed,
-              ]}
-              disabled={!!postPaidActionId || !!releasingId}
-              onPress={() => void handleComplete(r.id)}
-            >
-              {postPaidActionId === r.id ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.progressBtnText}>Terminer la course</Text>
-              )}
-            </Pressable>
+            <View style={styles.otpBlock}>
+              <Text style={styles.otpLabel}>Code de fin de course</Text>
+              <TextInput
+                style={styles.otpInput}
+                value={otpRideId === r.id ? otpInput : ''}
+                onFocus={() => setOtpRideId(r.id)}
+                onChangeText={(t: string) => {
+                  setOtpRideId(r.id);
+                  setOtpInput(t.replace(/\D/g, '').slice(0, 4));
+                }}
+                placeholder="0000"
+                keyboardType="number-pad"
+                maxLength={4}
+              />
+              <Pressable
+                style={({ pressed }) => [
+                  styles.progressBtn,
+                  postPaidActionId && styles.acceptBtnDisabled,
+                  pressed && !postPaidActionId && styles.progressBtnPressed,
+                ]}
+                disabled={!!postPaidActionId || !!releasingId}
+                onPress={() => void handleCompleteWithOtp(r.id)}
+              >
+                {postPaidActionId === r.id ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.progressBtnText}>
+                    Valider le code et terminer
+                  </Text>
+                )}
+              </Pressable>
+            </View>
           ) : null}
         </View>
       ))}
@@ -663,5 +688,29 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '700',
     fontSize: 16,
+  },
+  otpBlock: {
+    marginTop: 10,
+    gap: 8,
+  },
+  otpLabel: {
+    fontSize: 12,
+    color: '#64748b',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  otpInput: {
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    borderRadius: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#0f172a',
+    backgroundColor: '#fff',
+    fontVariant: ['tabular-nums'],
+    letterSpacing: 2,
+    textAlign: 'center',
   },
 });

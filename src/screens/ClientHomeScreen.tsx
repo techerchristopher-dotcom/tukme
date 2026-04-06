@@ -47,6 +47,7 @@ import { insertRequestedRide } from '../lib/createRide';
 import { syncRidePaymentExpiryIfDue } from '../lib/syncRidePaymentExpiry';
 import { useActiveRide } from '../hooks/useActiveRide';
 import { formatAriary } from '../lib/taxiPricing';
+import { supabase } from '../lib/supabase';
 import type { ClientRideStatus } from '../types/clientRide';
 import type { ClientDestination } from '../types/clientDestination';
 import type { RidePricingEstimate } from '../types/ridePricing';
@@ -98,6 +99,20 @@ function parseIsoMs(iso: string | null | undefined): number | null {
   }
   const ms = Date.parse(iso);
   return Number.isFinite(ms) ? ms : null;
+}
+
+async function fetchRideOtpForClient(rideId: string): Promise<string> {
+  const { data, error } = await supabase.rpc('get_ride_otp_for_client', {
+    p_ride_id: rideId,
+  });
+  if (error) {
+    throw error;
+  }
+  const otp = typeof data === 'string' ? data.trim() : '';
+  if (!otp) {
+    throw new Error('OTP manquant');
+  }
+  return otp;
 }
 
 function formatCurrentPositionText(location: ClientLocationState): string {
@@ -532,6 +547,33 @@ function ClientHomeMiddleContent(props: {
     destination: destinationForUi,
   });
 
+  const [rideOtp, setRideOtp] = useState<string | null>(null);
+  const [rideOtpError, setRideOtpError] = useState<string | null>(null);
+  const otpFetchedForRideIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const rideId = ride?.id ?? null;
+    if (!rideId || ride?.status !== 'in_progress') {
+      setRideOtp(null);
+      setRideOtpError(null);
+      otpFetchedForRideIdRef.current = null;
+      return;
+    }
+    if (otpFetchedForRideIdRef.current === rideId) {
+      return;
+    }
+    otpFetchedForRideIdRef.current = rideId;
+    setRideOtp(null);
+    setRideOtpError(null);
+    void fetchRideOtpForClient(rideId)
+      .then((otp) => setRideOtp(otp))
+      .catch((e) => {
+        setRideOtpError(
+          e instanceof Error ? e.message : 'Impossible de récupérer le code.'
+        );
+      });
+  }, [ride?.id, ride?.status]);
+
   const showDriverLiveHint =
     ride?.status === 'paid' || ride?.status === 'en_route' || ride?.status === 'arrived';
   const driverHasCoords =
@@ -926,6 +968,19 @@ function ClientHomeMiddleContent(props: {
             >
               {clientRideStatusMessage(ride.status)}
             </Text>
+          ) : null}
+          {ride?.status === 'in_progress' ? (
+            rideOtp ? (
+              <Text style={styles.orderHint}>
+                Code de fin de course : {rideOtp}
+                {'\n'}
+                Donnez ce code au chauffeur.
+              </Text>
+            ) : rideOtpError ? (
+              <Text style={styles.orderHint}>{rideOtpError}</Text>
+            ) : (
+              <Text style={styles.orderHint}>Chargement du code de fin de course…</Text>
+            )
           ) : null}
           {driverHint ? <Text style={styles.orderHint}>{driverHint}</Text> : null}
           {rideRealtimeError ? (
