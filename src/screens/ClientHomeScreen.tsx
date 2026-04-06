@@ -1,5 +1,6 @@
 import type { Session } from '@supabase/supabase-js';
 import * as Location from 'expo-location';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ClientMapBlock } from './ClientMapBlock';
 import {
   ClientStripeRoot,
@@ -113,6 +114,10 @@ async function fetchRideOtpForClient(rideId: string): Promise<string> {
     throw new Error('OTP manquant');
   }
   return otp;
+}
+
+function otpStorageKey(rideId: string): string {
+  return `ride:otp:${rideId}`;
 }
 
 function formatCurrentPositionText(location: ClientLocationState): string {
@@ -565,13 +570,31 @@ function ClientHomeMiddleContent(props: {
     otpFetchedForRideIdRef.current = rideId;
     setRideOtp(null);
     setRideOtpError(null);
-    void fetchRideOtpForClient(rideId)
-      .then((otp) => setRideOtp(otp))
-      .catch((e) => {
-        setRideOtpError(
-          e instanceof Error ? e.message : 'Impossible de récupérer le code.'
-        );
-      });
+    void (async () => {
+      try {
+        const cached = await AsyncStorage.getItem(otpStorageKey(rideId));
+        if (cached?.trim()) {
+          setRideOtp(cached.trim());
+          return;
+        }
+      } catch {
+        // ignore cache read errors
+      }
+      try {
+        const otp = await fetchRideOtpForClient(rideId);
+        setRideOtp(otp);
+        void AsyncStorage.setItem(otpStorageKey(rideId), otp).catch(() => undefined);
+      } catch (e) {
+        const raw = e instanceof Error ? e.message : '';
+        if (raw.includes('OTP_ALREADY_GENERATED')) {
+          setRideOtpError(
+            'Code déjà généré sur un autre appareil. Gardez le code affiché sur le téléphone du client.'
+          );
+        } else {
+          setRideOtpError(raw || 'Impossible de récupérer le code.');
+        }
+      }
+    })();
   }, [ride?.id, ride?.status]);
 
   const showDriverLiveHint =
