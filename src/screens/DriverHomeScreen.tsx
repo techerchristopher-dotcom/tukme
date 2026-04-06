@@ -15,6 +15,7 @@ import {
 } from '../lib/driverReleaseRide';
 import {
   DriverRideProgressError,
+  rpcCompleteRide,
   rpcMarkArrived,
   rpcStartEnRoute,
   rpcStartRide,
@@ -71,6 +72,8 @@ function driverAssignmentStatusMessage(status: string): string {
       return 'Paiement expiré';
     case 'in_progress':
       return 'Course en cours';
+    case 'completed':
+      return 'Course terminée';
     default:
       return `Statut : ${status}`;
   }
@@ -103,6 +106,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
         'arrived',
         'expired',
         'in_progress',
+        'completed',
       ])
       .order('updated_at', { ascending: false });
 
@@ -156,6 +160,29 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
       } else {
         await rpcStartRide(rideId);
       }
+      void fetchMine();
+    } catch (e) {
+      setActionError(
+        e instanceof DriverRideProgressError
+          ? e.message
+          : e instanceof Error
+            ? e.message
+            : 'Action impossible.'
+      );
+      void fetchMine();
+    } finally {
+      setPostPaidActionId(null);
+    }
+  }
+
+  async function handleComplete(rideId: string) {
+    if (releasingId || postPaidActionId) {
+      return;
+    }
+    setActionError(null);
+    setPostPaidActionId(rideId);
+    try {
+      await rpcCompleteRide(rideId);
       void fetchMine();
     } catch (e) {
       setActionError(
@@ -309,6 +336,23 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
                 <ActivityIndicator color="#fff" />
               ) : (
                 <Text style={styles.progressBtnText}>Démarrer la course</Text>
+              )}
+            </Pressable>
+          ) : null}
+          {r.status === 'in_progress' ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.progressBtn,
+                postPaidActionId && styles.acceptBtnDisabled,
+                pressed && !postPaidActionId && styles.progressBtnPressed,
+              ]}
+              disabled={!!postPaidActionId || !!releasingId}
+              onPress={() => void handleComplete(r.id)}
+            >
+              {postPaidActionId === r.id ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.progressBtnText}>Terminer la course</Text>
               )}
             </Pressable>
           ) : null}

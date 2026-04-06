@@ -19,10 +19,14 @@ function mapRpcError(raw: string): string {
   if (raw.includes('START_RIDE_NOT_ALLOWED')) {
     return 'Impossible de démarrer la course (étape précédente requise).';
   }
+  if (raw.includes('COMPLETE_RIDE_NOT_ALLOWED')) {
+    return 'Impossible de terminer la course (elle doit être en cours).';
+  }
   if (
     raw.includes('START_EN_ROUTE_NOT_DRIVER') ||
     raw.includes('MARK_ARRIVED_NOT_DRIVER') ||
-    raw.includes('START_RIDE_NOT_DRIVER')
+    raw.includes('START_RIDE_NOT_DRIVER') ||
+    raw.includes('COMPLETE_RIDE_NOT_DRIVER')
   ) {
     return 'Compte non autorisé.';
   }
@@ -54,6 +58,16 @@ export async function rpcStartRide(rideId: string): Promise<void> {
   if (error) {
     if (__DEV__) {
       console.error(`${LOG} start_ride`, error.message);
+    }
+    throw new DriverRideProgressError(mapRpcError(error.message ?? ''));
+  }
+}
+
+export async function rpcCompleteRide(rideId: string): Promise<void> {
+  const { error } = await supabase.rpc('complete_ride', { p_ride_id: rideId });
+  if (error) {
+    if (__DEV__) {
+      console.error(`${LOG} complete_ride`, error.message);
     }
     throw new DriverRideProgressError(mapRpcError(error.message ?? ''));
   }
