@@ -83,16 +83,17 @@ function buildUtcDayRangeForMadagascar(businessDate: string): { startIso: string
 }
 
 function parseAllowlistEmails(): Set<string> {
+  // MVP: keep allowlist controlled via env, but also support a minimal built-in fallback
+  // to avoid locking yourself out if secrets are not configured yet.
+  const fallback = ['techerchristopher@gmail.com'];
   const raw = (Deno.env.get('ADMIN_EMAILS') ?? '').trim();
-  if (!raw) {
-    return new Set();
-  }
-  return new Set(
-    raw
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean)
-  );
+  const fromEnv = raw
+    ? raw
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean)
+    : [];
+  return new Set([...fallback.map((s) => s.toLowerCase()), ...fromEnv]);
 }
 
 async function requireAdmin(req: Request): Promise<{
@@ -100,8 +101,24 @@ async function requireAdmin(req: Request): Promise<{
   userEmail: string;
 }> {
   const authHeader = req.headers.get('Authorization');
-  if (!authHeader?.startsWith('Bearer ')) {
-    throw Object.assign(new Error('Unauthorized'), { status: 401 });
+  const hasAuth = !!authHeader;
+  const hasBearer = !!authHeader?.startsWith('Bearer ');
+  const rawToken = hasBearer ? authHeader!.slice('Bearer '.length).trim() : '';
+  console.log('[admin-api] auth header present:', hasAuth);
+  console.log('[admin-api] bearer prefix ok:', hasBearer);
+  console.log('[admin-api] token length:', rawToken.length);
+
+  if (!hasAuth) {
+    throw Object.assign(new Error('AUTH_HEADER_MISSING'), { status: 401 });
+  }
+  if (!hasBearer) {
+    throw Object.assign(new Error('AUTH_BEARER_MISSING'), { status: 401 });
+  }
+  if (!rawToken) {
+    throw Object.assign(new Error('AUTH_TOKEN_EMPTY'), { status: 401 });
+  }
+  if (rawToken.length < 20) {
+    throw Object.assign(new Error('AUTH_TOKEN_TOO_SHORT'), { status: 401 });
   }
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
@@ -118,16 +135,18 @@ async function requireAdmin(req: Request): Promise<{
     throw Object.assign(new Error('Admin allowlist is empty (ADMIN_EMAILS).'), { status: 500 });
   }
 
-  const userClient = createClient(supabaseUrl, supabaseAnon, {
-    global: { headers: { Authorization: authHeader } },
-  });
+  // Verify JWT robustly by passing the raw token (not "Bearer ...") to getUser(token).
+  // This avoids any accidental double-prefixing or header handling quirks.
+  const userClient = createClient(supabaseUrl, supabaseAnon);
   const {
     data: { user },
     error: userErr,
-  } = await userClient.auth.getUser();
+  } = await userClient.auth.getUser(rawToken);
   if (userErr || !user) {
-    throw Object.assign(new Error('Invalid session'), { status: 401 });
+    console.log('[admin-api] getUser error:', userErr?.message ?? 'unknown');
+    throw Object.assign(new Error('AUTH_GETUSER_FAILED'), { status: 401 });
   }
+  console.log('[admin-api] getUser ok, user id present:', !!user.id);
 
   const email = String(user.email ?? '').trim().toLowerCase();
   if (!email || !allow.has(email)) {
