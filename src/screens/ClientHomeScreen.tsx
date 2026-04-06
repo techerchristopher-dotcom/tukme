@@ -586,6 +586,13 @@ function ClientHomeMiddleContent(props: {
         void AsyncStorage.setItem(otpStorageKey(rideId), otp).catch(() => undefined);
       } catch (e) {
         const raw = e instanceof Error ? e.message : '';
+        if (__DEV__) {
+          console.error('[ride-otp] get_ride_otp_for_client failed', {
+            rideId,
+            status: ride?.status,
+            message: raw,
+          });
+        }
         setRideOtpError(raw || 'Impossible de récupérer le code.');
       }
     })();
