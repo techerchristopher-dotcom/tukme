@@ -22,6 +22,11 @@ export type ClientRideSnapshot = {
   status: ClientRideStatus;
   driver_id: string | null;
   updated_at: string;
+  /** Position chauffeur (nullable tant que non envoyée). */
+  driver_lat: number | null;
+  driver_lng: number | null;
+  /** Dernière mise à jour position chauffeur (UTC ISO). */
+  driver_location_updated_at: string | null;
   destination_label: string;
   destination_lat: number;
   destination_lng: number;

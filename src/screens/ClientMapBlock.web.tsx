@@ -11,6 +11,8 @@ export function ClientMapBlock(props: {
   location: ClientLocationState;
   destination: ClientDestination | null;
   routeMetrics: RouteMetricsUiState;
+  driverLat?: number | null;
+  driverLng?: number | null;
 }) {
   const { location, destination, routeMetrics } = props;
 

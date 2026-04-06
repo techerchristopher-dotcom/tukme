@@ -1,5 +1,5 @@
 import type { Session } from '@supabase/supabase-js';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 
 import { SignedInShell } from '../components/SignedInShell';
+import { useDriverLiveLocation } from '../hooks/useDriverLiveLocation';
 import {
   driverReleaseRideBeforePayment,
   DriverReleaseRideError,
@@ -125,6 +126,19 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
   useEffect(() => {
     void fetchMine();
   }, [fetchMine]);
+
+  const rideForTracking = useMemo(() => {
+    return (
+      rides.find(
+        (r) => r.status === 'paid' || r.status === 'en_route' || r.status === 'arrived'
+      ) ?? null
+    );
+  }, [rides]);
+
+  useDriverLiveLocation({
+    rideId: rideForTracking?.id ?? null,
+    rideStatus: rideForTracking?.status ?? null,
+  });
 
   useEffect(() => {
     const channel = supabase

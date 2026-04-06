@@ -6,7 +6,7 @@ import type { ClientRideSnapshot, ClientRideStatus } from '../types/clientRide';
 const LOG = '[ride-realtime]';
 
 const RIDE_SELECT_COLUMNS =
-  'id, status, driver_id, updated_at, destination_label, destination_lat, destination_lng, destination_place_id, estimated_price_eur, payment_expires_at';
+  'id, status, driver_id, updated_at, driver_lat, driver_lng, driver_location_updated_at, destination_label, destination_lat, destination_lng, destination_place_id, estimated_price_eur, payment_expires_at';
 
 const OPEN_STATUSES: ClientRideStatus[] = [
   'requested',
@@ -78,6 +78,38 @@ function buildRideSnapshot(
     driver_id = prev?.driver_id ?? null;
   }
 
+  let driver_lat: number | null;
+  if (row.driver_lat === undefined) {
+    driver_lat = prev?.driver_lat ?? null;
+  } else if (row.driver_lat === null) {
+    driver_lat = null;
+  } else {
+    const v = num(row.driver_lat);
+    driver_lat = v ?? null;
+  }
+
+  let driver_lng: number | null;
+  if (row.driver_lng === undefined) {
+    driver_lng = prev?.driver_lng ?? null;
+  } else if (row.driver_lng === null) {
+    driver_lng = null;
+  } else {
+    const v = num(row.driver_lng);
+    driver_lng = v ?? null;
+  }
+
+  let driver_location_updated_at: string | null;
+  if (row.driver_location_updated_at === undefined) {
+    driver_location_updated_at = prev?.driver_location_updated_at ?? null;
+  } else if (
+    row.driver_location_updated_at === null ||
+    typeof row.driver_location_updated_at === 'string'
+  ) {
+    driver_location_updated_at = row.driver_location_updated_at as string | null;
+  } else {
+    driver_location_updated_at = prev?.driver_location_updated_at ?? null;
+  }
+
   const destLabel =
     typeof row.destination_label === 'string'
       ? row.destination_label
@@ -126,6 +158,9 @@ function buildRideSnapshot(
     status,
     driver_id,
     updated_at,
+    driver_lat,
+    driver_lng,
+    driver_location_updated_at,
     destination_label: destLabel,
     destination_lat: destLat,
     destination_lng: destLng,

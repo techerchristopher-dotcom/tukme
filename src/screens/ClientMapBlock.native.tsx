@@ -44,8 +44,10 @@ export function ClientMapBlock(props: {
   location: ClientLocationState;
   destination: ClientDestination | null;
   routeMetrics: RouteMetricsUiState;
+  driverLat?: number | null;
+  driverLng?: number | null;
 }) {
-  const { location, destination, routeMetrics } = props;
+  const { location, destination, routeMetrics, driverLat, driverLng } = props;
 
   const mapRef = useRef<InstanceType<
     typeof import('react-native-maps').default
@@ -117,6 +119,16 @@ export function ClientMapBlock(props: {
         showsCompass
       >
         <Marker coordinate={{ latitude, longitude }} title="Vous êtes ici" />
+        {typeof driverLat === 'number' &&
+        Number.isFinite(driverLat) &&
+        typeof driverLng === 'number' &&
+        Number.isFinite(driverLng) ? (
+          <Marker
+            coordinate={{ latitude: driverLat, longitude: driverLng }}
+            title="Chauffeur"
+            pinColor="#2563eb"
+          />
+        ) : null}
         {destination ? (
           <Marker
             coordinate={{

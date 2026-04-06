@@ -92,6 +92,14 @@ function clientRideStatusMessage(status: ClientRideStatus): string {
   }
 }
 
+function parseIsoMs(iso: string | null | undefined): number | null {
+  if (!iso) {
+    return null;
+  }
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
+}
+
 function formatCurrentPositionText(location: ClientLocationState): string {
   if (location.phase === 'loading') {
     return 'Recherche en cours…';
@@ -524,6 +532,25 @@ function ClientHomeMiddleContent(props: {
     destination: destinationForUi,
   });
 
+  const showDriverLiveHint =
+    ride?.status === 'paid' || ride?.status === 'en_route' || ride?.status === 'arrived';
+  const driverHasCoords =
+    ride?.driver_lat != null &&
+    Number.isFinite(ride.driver_lat) &&
+    ride?.driver_lng != null &&
+    Number.isFinite(ride.driver_lng);
+  const driverUpdatedMs = parseIsoMs(ride?.driver_location_updated_at);
+  const driverStale =
+    driverUpdatedMs != null ? Date.now() - driverUpdatedMs > 15_000 : false;
+  const driverHint =
+    !showDriverLiveHint
+      ? null
+      : !driverHasCoords
+        ? 'Position du chauffeur en cours…'
+        : driverStale
+          ? 'Position en attente…'
+          : null;
+
   const canOrder = useMemo(() => {
     if (!userId.trim()) {
       return false;
@@ -812,6 +839,8 @@ function ClientHomeMiddleContent(props: {
         location={location}
         destination={destinationForUi}
         routeMetrics={routeMetrics}
+        driverLat={ride?.driver_lat ?? null}
+        driverLng={ride?.driver_lng ?? null}
       />
       <ZonePricingCard
         estimate={ridePricing}
@@ -898,6 +927,7 @@ function ClientHomeMiddleContent(props: {
               {clientRideStatusMessage(ride.status)}
             </Text>
           ) : null}
+          {driverHint ? <Text style={styles.orderHint}>{driverHint}</Text> : null}
           {rideRealtimeError ? (
             <Text style={styles.orderRealtimeWarning}>{rideRealtimeError}</Text>
           ) : null}
