@@ -5,6 +5,7 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [k: string]:
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
 };
 
 function jsonResponse(
@@ -59,8 +60,61 @@ function parseBusinessDateOrThrow(dateStr: string | null): string {
 
 function isUuid(v: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    v
+    v.trim()
   );
+}
+
+function normalizePathId(raw: string): string {
+  try {
+    return decodeURIComponent(raw).trim();
+  } catch {
+    return raw.trim();
+  }
+}
+
+function asNonEmptyString(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+function asInt(v: unknown): number | null {
+  if (typeof v === 'number') {
+    return Number.isInteger(v) ? v : null;
+  }
+  if (typeof v === 'string' && v.trim()) {
+    const n = Number.parseInt(v.trim(), 10);
+    return Number.isInteger(n) ? n : null;
+  }
+  return null;
+}
+
+async function readJsonBody(req: Request): Promise<Record<string, unknown>> {
+  const ct = (req.headers.get('content-type') ?? '').toLowerCase();
+  if (!ct.includes('application/json')) {
+    throw Object.assign(new Error('Expected application/json body'), { status: 415 });
+  }
+  const body = await req.json().catch(() => null);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw Object.assign(new Error('Invalid JSON body'), { status: 400 });
+  }
+  return body as Record<string, unknown>;
+}
+
+/** E.164 : + puis 1–15 chiffres (national number), premier chiffre ≠ 0. */
+function normalizePhoneE164(raw: string): string {
+  const compact = raw.replace(/[\s().-]/g, '').trim();
+  if (!compact) {
+    throw Object.assign(new Error('phone requis'), { status: 400 });
+  }
+  if (!compact.startsWith('+')) {
+    throw Object.assign(
+      new Error('Numéro invalide : format E.164 obligatoire (ex: +261xxxxxxxxx).'),
+      { status: 400 }
+    );
+  }
+  if (!/^\+[1-9]\d{1,14}$/.test(compact)) {
+    throw Object.assign(new Error('Numéro invalide : format E.164 incorrect.'), { status: 400 });
+  }
+  return compact;
 }
 
 function assertOneOf(paramName: string, value: string | null, allowed: readonly string[]) {
@@ -199,11 +253,19 @@ async function handlePlatformDailySummary(req: Request, url: URL) {
 async function handleDriversDailySummary(req: Request, url: URL) {
   const date = parseBusinessDateOrThrow(getStringParam(url, 'date'));
   const tz = mustBeMadagascarTz(getStringParam(url, 'tz', 'Indian/Antananarivo'));
+  const rawStatus = (getStringParam(url, 'driver_status', 'active') ?? 'active').trim().toLowerCase();
+  if (rawStatus !== 'active' && rawStatus !== 'inactive' && rawStatus !== 'all') {
+    throw Object.assign(
+      new Error('driver_status must be one of: active, inactive, all'),
+      { status: 400 }
+    );
+  }
 
   const { adminClient } = await requireAdmin(req);
   const { data, error } = await adminClient.rpc('admin_driver_daily_summary', {
     p_business_date: date,
     p_tz: tz,
+    p_status: rawStatus,
   });
   if (error) {
     console.error('[admin-api] admin_driver_daily_summary', error.message);
@@ -212,7 +274,10 @@ async function handleDriversDailySummary(req: Request, url: URL) {
   return jsonResponse(200, { data, error: null });
 }
 
-async function handleDriverDetail(req: Request, url: URL, driverId: string) {
+type RpcDriverDayRow = { driver_id?: string | null };
+
+async function handleDriverDetail(req: Request, url: URL, driverIdRaw: string) {
+  const driverId = normalizePathId(driverIdRaw);
   if (!isUuid(driverId)) {
     return jsonResponse(400, { data: null, error: { message: 'Invalid driverId' } });
   }
@@ -224,7 +289,7 @@ async function handleDriverDetail(req: Request, url: URL, driverId: string) {
 
   const { data: profile, error: profErr } = await adminClient
     .from('profiles')
-    .select('id, full_name, phone, email, role, created_at')
+    .select('id, full_name, phone, email, role, created_at, deleted_at')
     .eq('id', driverId)
     .maybeSingle();
   if (profErr) {
@@ -248,13 +313,14 @@ async function handleDriverDetail(req: Request, url: URL, driverId: string) {
   const { data: dayRows, error: dayErr } = await adminClient.rpc('admin_driver_daily_summary', {
     p_business_date: date,
     p_tz: tz,
+    p_status: 'all',
   });
   if (dayErr) {
     console.error('[admin-api] driver daily summary', dayErr.message);
     return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
   }
   const today = Array.isArray(dayRows)
-    ? dayRows.find((r: any) => r?.driver_id === driverId) ?? null
+    ? dayRows.find((r: RpcDriverDayRow) => String(r?.driver_id ?? '') === driverId) ?? null
     : null;
 
   const ridesQ = adminClient
@@ -306,6 +372,244 @@ async function handleDriverDetail(req: Request, url: URL, driverId: string) {
     },
     error: null,
   });
+}
+
+type CreatePayoutInput = {
+  driver_id: string;
+  amount_ariary: number;
+  method: 'cash' | 'orange_money';
+  reference?: string | null;
+  notes?: string | null;
+};
+
+async function handleCreatePayout(req: Request): Promise<Response> {
+  const { adminClient } = await requireAdmin(req);
+  const body = await readJsonBody(req);
+
+  const driverId = asNonEmptyString(body.driver_id);
+  if (!driverId || !isUuid(driverId)) {
+    throw Object.assign(new Error('driver_id must be a valid UUID'), { status: 400 });
+  }
+
+  const { data: prof, error: profErr } = await adminClient
+    .from('profiles')
+    .select('deleted_at')
+    .eq('id', driverId.trim())
+    .maybeSingle();
+  if (profErr) {
+    console.error('[admin-api] payout profile check', profErr.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  if (prof?.deleted_at != null) {
+    return jsonResponse(400, {
+      data: null,
+      error: { message: 'Chauffeur désactivé : enregistrement de payout impossible.' },
+    });
+  }
+
+  const amount = asInt(body.amount_ariary);
+  if (amount == null || amount <= 0) {
+    throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+  }
+
+  const method = asNonEmptyString(body.method);
+  if (method !== 'cash' && method !== 'orange_money') {
+    throw Object.assign(new Error("method must be one of: cash, orange_money"), { status: 400 });
+  }
+
+  const reference = asNonEmptyString(body.reference);
+  const notes = asNonEmptyString(body.notes);
+
+  const input: CreatePayoutInput = {
+    driver_id: driverId.trim(),
+    amount_ariary: amount,
+    method,
+    reference: reference ?? null,
+    notes: notes ?? null,
+  };
+
+  const { data: payoutId, error } = await adminClient.rpc('record_driver_payout', {
+    p_driver_id: input.driver_id,
+    p_amount_ariary: input.amount_ariary,
+    p_method: input.method,
+    p_status: 'recorded',
+    p_paid_at: null,
+    p_reference: input.reference,
+    p_notes: input.notes,
+  });
+
+  if (error) {
+    const msg = String(error.message ?? 'RPC error');
+    // Bubble up friendly Postgres-raised messages where possible.
+    if (msg.includes('PAYOUT_INVALID_AMOUNT')) {
+      throw Object.assign(new Error('Montant payout invalide.'), { status: 400 });
+    }
+    console.error('[admin-api] record_driver_payout', msg);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  return jsonResponse(200, { data: { payout_id: payoutId }, error: null });
+}
+
+async function handleCreateDriver(req: Request): Promise<Response> {
+  const { adminClient } = await requireAdmin(req);
+  const body = await readJsonBody(req);
+
+  const firstName = asNonEmptyString(body.first_name);
+  const lastName = asNonEmptyString(body.last_name);
+  const phoneRaw = asNonEmptyString(body.phone);
+  const plateRaw = asNonEmptyString(body.vehicle_plate);
+
+  if (!firstName || !lastName) {
+    throw Object.assign(new Error('first_name et last_name sont obligatoires'), { status: 400 });
+  }
+  if (!phoneRaw) {
+    throw Object.assign(new Error('phone est obligatoire'), { status: 400 });
+  }
+  if (!plateRaw) {
+    throw Object.assign(new Error('vehicle_plate est obligatoire'), { status: 400 });
+  }
+
+  const phone = normalizePhoneE164(phoneRaw);
+  const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+
+  const { data: existingId, error: findErr } = await adminClient.rpc('admin_find_user_id_by_phone', {
+    p_phone: phone,
+  });
+  if (findErr) {
+    console.error('[admin-api] admin_find_user_id_by_phone', findErr.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  let userId = typeof existingId === 'string' && isUuid(existingId) ? existingId : null;
+  let createdNewAuthUser = false;
+
+  if (!userId) {
+    const { data: created, error: cuErr } = await adminClient.auth.admin.createUser({
+      phone,
+      phone_confirm: true,
+    });
+    if (cuErr || !created?.user?.id) {
+      const msg = String(cuErr?.message ?? 'createUser failed');
+      const { data: retryId } = await adminClient.rpc('admin_find_user_id_by_phone', {
+        p_phone: phone,
+      });
+      if (typeof retryId === 'string' && isUuid(retryId)) {
+        userId = retryId;
+      } else {
+        if (/duplicate|already|exists|registered/i.test(msg)) {
+          return jsonResponse(409, {
+            data: null,
+            error: { message: 'Ce numéro est déjà utilisé (auth).' },
+          });
+        }
+        console.error('[admin-api] auth.admin.createUser', msg);
+        return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+      }
+    } else {
+      userId = created.user.id;
+      createdNewAuthUser = true;
+    }
+  }
+
+  if (!userId) {
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  const { data: driverId, error: bundleErr } = await adminClient.rpc('admin_create_driver_bundle', {
+    p_user_id: userId,
+    p_full_name: fullName,
+    p_phone: phone,
+    p_plate: plateRaw.trim(),
+  });
+
+  if (bundleErr) {
+    if (createdNewAuthUser) {
+      const { error: delErr } = await adminClient.auth.admin.deleteUser(userId);
+      if (delErr) {
+        console.error('[admin-api] rollback deleteUser', delErr.message);
+      }
+    }
+    const bmsg = String(bundleErr.message ?? '');
+    if (bmsg.includes('PLATE_INVALID')) {
+      return jsonResponse(400, { data: null, error: { message: 'Immatriculation invalide.' } });
+    }
+    if (bmsg.includes('FULL_NAME_INVALID')) {
+      return jsonResponse(400, { data: null, error: { message: 'Nom complet invalide.' } });
+    }
+    if (bmsg.includes('PROFILE_DEACTIVATED')) {
+      return jsonResponse(409, {
+        data: null,
+        error: {
+          message: 'Ce numéro est lié à un chauffeur désactivé.',
+        },
+      });
+    }
+    console.error('[admin-api] admin_create_driver_bundle', bmsg);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  return jsonResponse(200, { data: { driver_id: driverId }, error: null });
+}
+
+async function handleDeactivateDriver(req: Request, driverIdRaw: string): Promise<Response> {
+  const driverId = normalizePathId(driverIdRaw);
+  if (!isUuid(driverId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid driverId' } });
+  }
+
+  const { adminClient } = await requireAdmin(req);
+
+  const { error: rpcErr } = await adminClient.rpc('admin_deactivate_driver', {
+    p_driver_id: driverId,
+  });
+  if (rpcErr) {
+    const msg = String(rpcErr.message ?? '');
+    if (msg.includes('DRIVER_NOT_FOUND')) {
+      return jsonResponse(404, { data: null, error: { message: 'Chauffeur introuvable.' } });
+    }
+    console.error('[admin-api] admin_deactivate_driver', msg);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  const { error: banErr } = await adminClient.auth.admin.updateUserById(driverId, {
+    ban_duration: '876600h',
+  });
+  if (banErr) {
+    console.error('[admin-api] ban user after deactivate', banErr.message);
+  }
+
+  return jsonResponse(200, { data: { ok: true }, error: null });
+}
+
+async function handleReactivateDriver(req: Request, driverIdRaw: string): Promise<Response> {
+  const driverId = normalizePathId(driverIdRaw);
+  if (!isUuid(driverId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid driverId' } });
+  }
+
+  const { adminClient } = await requireAdmin(req);
+
+  const { error: rpcErr } = await adminClient.rpc('admin_reactivate_driver', {
+    p_driver_id: driverId,
+  });
+  if (rpcErr) {
+    const msg = String(rpcErr.message ?? '');
+    if (msg.includes('DRIVER_NOT_FOUND')) {
+      return jsonResponse(404, { data: null, error: { message: 'Chauffeur introuvable.' } });
+    }
+    console.error('[admin-api] admin_reactivate_driver', msg);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  const { error: unbanErr } = await adminClient.auth.admin.updateUserById(driverId, {
+    ban_duration: 'none',
+  });
+  if (unbanErr) {
+    console.error('[admin-api] unban user after reactivate', unbanErr.message);
+  }
+
+  return jsonResponse(200, { data: { ok: true }, error: null });
 }
 
 async function handleCompletedRides(req: Request, url: URL) {
@@ -439,7 +743,7 @@ Deno.serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
-  if (req.method !== 'GET') {
+  if (req.method !== 'GET' && req.method !== 'POST' && req.method !== 'DELETE') {
     return jsonResponse(405, { data: null, error: { message: 'Method not allowed' } });
   }
 
@@ -465,9 +769,24 @@ Deno.serve(async (req) => {
     if (scope === 'drivers') {
       if (rest[0] === 'daily-summary') return await handleDriversDailySummary(req, url);
       if (rest.length >= 2 && rest[1] === 'detail') {
-        const driverId = rest[0];
+        const driverId = normalizePathId(rest[0] ?? '');
         return await handleDriverDetail(req, url, driverId);
       }
+      if (rest.length === 2 && rest[1] === 'reactivate' && req.method === 'POST') {
+        const driverId = normalizePathId(rest[0] ?? '');
+        if (!isUuid(driverId)) {
+          return jsonResponse(400, { data: null, error: { message: 'Invalid driverId' } });
+        }
+        return await handleReactivateDriver(req, driverId);
+      }
+      if (rest.length === 1 && req.method === 'DELETE') {
+        const driverId = normalizePathId(rest[0] ?? '');
+        if (!isUuid(driverId)) {
+          return jsonResponse(400, { data: null, error: { message: 'Invalid driverId' } });
+        }
+        return await handleDeactivateDriver(req, driverId);
+      }
+      if (rest.length === 0 && req.method === 'POST') return await handleCreateDriver(req);
       return jsonResponse(404, { data: null, error: { message: 'Not found' } });
     }
 
@@ -477,7 +796,10 @@ Deno.serve(async (req) => {
     }
 
     if (scope === 'payouts') {
-      if (rest.length === 0) return await handlePayouts(req, url);
+      if (rest.length === 0) {
+        if (req.method === 'GET') return await handlePayouts(req, url);
+        if (req.method === 'POST') return await handleCreatePayout(req);
+      }
       return jsonResponse(404, { data: null, error: { message: 'Not found' } });
     }
 
@@ -488,7 +810,13 @@ Deno.serve(async (req) => {
 
     return jsonResponse(404, { data: null, error: { message: 'Not found' } });
   } catch (e) {
-    const status = typeof (e as any)?.status === 'number' ? (e as any).status : 500;
+    const status =
+      e !== null &&
+      typeof e === 'object' &&
+      'status' in e &&
+      typeof (e as { status: unknown }).status === 'number'
+        ? (e as { status: number }).status
+        : 500;
     const msg = e instanceof Error ? e.message : 'Unknown error';
     if (status >= 500) {
       console.error('[admin-api] unhandled error', e);

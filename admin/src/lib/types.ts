@@ -27,11 +27,16 @@ export type PlatformDailySummary = {
 
 export type RideStatus = 'completed';
 
+/** Filtre liste chauffeurs (compte soft-delete). */
+export type DriverAccountListFilter = 'active' | 'inactive' | 'all';
+
 export type DriverDailySummaryRow = {
   business_date: string; // YYYY-MM-DD
   driver_id: string;
   full_name: string | null;
   phone: string | null;
+  /** Présent si désactivé (soft-delete). */
+  deleted_at?: string | null;
   rides_count: number;
   gross_fares_ariary: number;
   platform_commission_ariary: number;
@@ -83,6 +88,33 @@ export type PayoutRow = {
   driver_phone: string | null;
 };
 
+export type CreateDriverPayoutInput = {
+  driver_id: string;
+  amount_ariary: number;
+  method: PayoutMethod;
+  reference?: string | null;
+  notes?: string | null;
+};
+
+export type CreateDriverPayoutResponse = {
+  payout_id: string;
+};
+
+export type CreateDriverInput = {
+  first_name: string;
+  last_name: string;
+  phone: string;
+  vehicle_plate: string;
+};
+
+export type CreateDriverResponse = {
+  driver_id: string;
+};
+
+export type DeactivateDriverResponse = {
+  ok: boolean;
+};
+
 export type RentStatus = 'due' | 'paid' | 'waived';
 
 export type DailyRentRow = {
@@ -99,5 +131,32 @@ export type DailyRentRow = {
   vehicle_owner_type: 'platform' | 'driver';
   vehicle_kind: string | null;
   vehicle_plate_number: string | null;
+};
+
+export type DriverBalanceRow = {
+  driver_id: string;
+  total_credits_ariary: number;
+  total_debits_ariary: number;
+  driver_balance_ariary: number;
+};
+
+export type DriverProfileRow = {
+  id: string;
+  full_name: string | null;
+  phone: string | null;
+  email?: string | null;
+  role?: string | null;
+  created_at?: string | null;
+  /** Si présent : chauffeur désactivé (soft-delete), hors listes opérationnelles. */
+  deleted_at?: string | null;
+};
+
+export type DriverDetailResponse = {
+  driver: DriverProfileRow;
+  balance: DriverBalanceRow;
+  today: DriverDailySummaryRow | null;
+  rides: Paginated<CompletedRideRow>;
+  payouts: Paginated<PayoutRow>;
+  rents: Paginated<DailyRentRow>;
 };
 

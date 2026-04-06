@@ -1,10 +1,18 @@
 import { getSupabaseBrowser } from './supabaseBrowserClient';
+import { isUuidString } from './uuid';
 import type {
   ApiError,
   ApiResult,
   CompletedRideRow,
+  CreateDriverInput,
+  CreateDriverPayoutInput,
+  CreateDriverPayoutResponse,
+  CreateDriverResponse,
+  DeactivateDriverResponse,
   DailyRentRow,
+  DriverAccountListFilter,
   DriverDailySummaryRow,
+  DriverDetailResponse,
   Paginated,
   PayoutRow,
   PlatformDailySummary,
@@ -21,15 +29,27 @@ const BASE_URL = (() => {
   return `${url.replace(/\/+$/, '')}/functions/v1/admin-api`;
 })();
 
+function readStringProp(obj: Record<string, unknown>, key: string): string | null {
+  const v = obj[key];
+  return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
 function parseApiError(payload: unknown, fallback: string): ApiError {
-  if (payload && typeof payload === 'object') {
-    const anyPayload = payload as any;
-    const msg =
-      (typeof anyPayload?.error?.message === 'string' && anyPayload.error.message) ||
-      (typeof anyPayload?.error === 'string' && anyPayload.error) ||
-      (typeof anyPayload?.message === 'string' && anyPayload.message) ||
-      '';
-    if (msg.trim()) return { message: msg.trim() };
+  if (payload && typeof payload === 'object' && payload !== null && !Array.isArray(payload)) {
+    const o = payload as Record<string, unknown>;
+    const err = o.error;
+    let msg = '';
+    if (err && typeof err === 'object' && err !== null && !Array.isArray(err)) {
+      const em = readStringProp(err as Record<string, unknown>, 'message');
+      if (em) msg = em;
+    } else if (typeof err === 'string' && err.trim()) {
+      msg = err.trim();
+    }
+    if (!msg) {
+      const top = readStringProp(o, 'message');
+      if (top) msg = top;
+    }
+    if (msg) return { message: msg };
   }
   return { message: fallback };
 }
@@ -97,11 +117,146 @@ async function fetchAdmin<T>(pathAndQuery: string): Promise<ApiResult<T>> {
   }
 
   // Expect Edge Function standard envelope: { data, error }
-  const env = payload as any;
-  if (env.error) {
+  const env = payload as Record<string, unknown>;
+  if (env.error != null && env.error !== false) {
+    return { data: null, error: parseApiError(env, 'Request failed') };
+  }
+  const inner = env.data;
+  return { data: (inner as T) ?? null, error: null } as ApiResult<T>;
+}
+
+async function callAdminJson<T>(args: {
+  path: string;
+  method: 'POST';
+  body: Record<string, unknown>;
+}): Promise<ApiResult<T>> {
+  if (!BASE_URL) return { data: null, error: { message: 'Missing NEXT_PUBLIC_SUPABASE_URL' } };
+
+  const supabase = getSupabaseBrowser();
+  if (!supabase) {
+    return {
+      data: null,
+      error: { message: 'Missing NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY' },
+    };
+  }
+
+  const { data, error: sessErr } = await supabase.auth.getSession();
+  if (sessErr) return { data: null, error: { message: 'Session error' } };
+  const token = data.session?.access_token;
+  if (!token) return { data: null, error: { message: 'Not authenticated' } };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${args.path}`, {
+      method: args.method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(args.body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      return { data: null, error: { message: 'Request timeout' } };
+    }
+    return { data: null, error: { message: 'Request failed' } };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) {
+    const fallback = `HTTP ${res.status}`;
+    return { data: null, error: parseApiError(payload, fallback) };
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return { data: null, error: { message: 'Invalid response' } };
+  }
+
+  const env = payload as Record<string, unknown>;
+  if (env.error != null && env.error !== false) {
     return { data: null, error: parseApiError(env, 'Request failed') };
   }
   return { data: (env.data as T) ?? null, error: null } as ApiResult<T>;
+}
+
+async function callAdminDelete<T>(path: string): Promise<ApiResult<T>> {
+  if (!BASE_URL) return { data: null, error: { message: 'Missing NEXT_PUBLIC_SUPABASE_URL' } };
+
+  const supabase = getSupabaseBrowser();
+  if (!supabase) {
+    return {
+      data: null,
+      error: { message: 'Missing NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY' },
+    };
+  }
+
+  const { data, error: sessErr } = await supabase.auth.getSession();
+  if (sessErr) return { data: null, error: { message: 'Session error' } };
+  const token = data.session?.access_token;
+  if (!token) return { data: null, error: { message: 'Not authenticated' } };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      return { data: null, error: { message: 'Request timeout' } };
+    }
+    return { data: null, error: { message: 'Request failed' } };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) {
+    const fallback = `HTTP ${res.status}`;
+    return { data: null, error: parseApiError(payload, fallback) };
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return { data: null, error: { message: 'Invalid response' } };
+  }
+
+  const env = payload as Record<string, unknown>;
+  if (env.error != null && env.error !== false) {
+    return { data: null, error: parseApiError(env, 'Request failed') };
+  }
+  return { data: (env.data as T) ?? null, error: null } as ApiResult<T>;
+}
+
+export async function deactivateDriver(driverId: string): Promise<ApiResult<DeactivateDriverResponse>> {
+  const id = driverId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant chauffeur invalide' } };
+  }
+  return callAdminDelete<DeactivateDriverResponse>(`/drivers/${encodeURIComponent(id)}`);
+}
+
+export async function reactivateDriver(driverId: string): Promise<ApiResult<DeactivateDriverResponse>> {
+  const id = driverId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant chauffeur invalide' } };
+  }
+  return callAdminJson<DeactivateDriverResponse>({
+    path: `/drivers/${encodeURIComponent(id)}/reactivate`,
+    method: 'POST',
+    body: {},
+  });
 }
 
 export async function getPlatformDailySummary(
@@ -111,9 +266,15 @@ export async function getPlatformDailySummary(
 }
 
 export async function getDriversDailySummary(
-  date: string
+  date: string,
+  driverStatus: DriverAccountListFilter = 'active'
 ): Promise<ApiResult<DriverDailySummaryRow[]>> {
-  return fetchAdmin(`/drivers/daily-summary?date=${encodeURIComponent(date)}&tz=Indian/Antananarivo`);
+  const q = buildQuery({
+    date,
+    tz: 'Indian/Antananarivo',
+    driver_status: driverStatus,
+  });
+  return fetchAdmin(`/drivers/daily-summary${q}`);
 }
 
 export async function getCompletedRides(params: {
@@ -169,5 +330,80 @@ export async function getRents(params: {
     offset: params.offset ?? 0,
   });
   return fetchAdmin(`/rents${query}`);
+}
+
+export async function getDriverDetail(params: {
+  driverId: string;
+  date: string;
+  limit?: number;
+  offset?: number;
+}): Promise<ApiResult<DriverDetailResponse>> {
+  const id = params.driverId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant chauffeur invalide' } };
+  }
+  const query = buildQuery({
+    date: params.date,
+    tz: 'Indian/Antananarivo',
+    limit: params.limit ?? 50,
+    offset: params.offset ?? 0,
+  });
+  return fetchAdmin(`/drivers/${encodeURIComponent(id)}/detail${query}`);
+}
+
+export async function createDriver(
+  input: CreateDriverInput
+): Promise<ApiResult<CreateDriverResponse>> {
+  const first = input.first_name.trim();
+  const last = input.last_name.trim();
+  const phone = input.phone.trim();
+  const plate = input.vehicle_plate.trim();
+  if (!first || !last) {
+    return { data: null, error: { message: 'Prénom et nom obligatoires' } };
+  }
+  if (!phone) {
+    return { data: null, error: { message: 'Téléphone obligatoire' } };
+  }
+  if (!plate) {
+    return { data: null, error: { message: 'Immatriculation obligatoire' } };
+  }
+  return callAdminJson<CreateDriverResponse>({
+    path: '/drivers',
+    method: 'POST',
+    body: {
+      first_name: first,
+      last_name: last,
+      phone,
+      vehicle_plate: plate,
+    },
+  });
+}
+
+export async function createDriverPayout(
+  input: CreateDriverPayoutInput
+): Promise<ApiResult<CreateDriverPayoutResponse>> {
+  const driverId = input.driver_id.trim();
+  if (!isUuidString(driverId)) {
+    return { data: null, error: { message: 'driver_id invalide' } };
+  }
+  const amount = input.amount_ariary;
+  if (!Number.isInteger(amount) || amount <= 0) {
+    return { data: null, error: { message: 'amount_ariary doit être un entier > 0' } };
+  }
+  if (input.method !== 'cash' && input.method !== 'orange_money') {
+    return { data: null, error: { message: 'method invalide' } };
+  }
+
+  return callAdminJson<CreateDriverPayoutResponse>({
+    path: '/payouts',
+    method: 'POST',
+    body: {
+      driver_id: driverId,
+      amount_ariary: amount,
+      method: input.method,
+      reference: input.reference ?? null,
+      notes: input.notes ?? null,
+    },
+  });
 }
 
