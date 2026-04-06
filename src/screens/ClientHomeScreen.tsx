@@ -586,13 +586,7 @@ function ClientHomeMiddleContent(props: {
         void AsyncStorage.setItem(otpStorageKey(rideId), otp).catch(() => undefined);
       } catch (e) {
         const raw = e instanceof Error ? e.message : '';
-        if (raw.includes('OTP_ALREADY_GENERATED')) {
-          setRideOtpError(
-            'Code déjà généré sur un autre appareil. Gardez le code affiché sur le téléphone du client.'
-          );
-        } else {
-          setRideOtpError(raw || 'Impossible de récupérer le code.');
-        }
+        setRideOtpError(raw || 'Impossible de récupérer le code.');
       }
     })();
   }, [ride?.id, ride?.status]);
