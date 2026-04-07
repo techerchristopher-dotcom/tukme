@@ -21,6 +21,7 @@ import {
   Animated,
   Easing,
   Keyboard,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -32,6 +33,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { PressableScale } from '../components/PressableScale';
 import {
   type ClientLocationState,
   useClientLocation,
@@ -62,6 +64,7 @@ import type { ClientRideStatus } from '../types/clientRide';
 import type { ClientDestination } from '../types/clientDestination';
 import type { RidePricingEstimate } from '../types/ridePricing';
 import type { Profile } from '../types/profile';
+import { SearchingDriverView } from '../components/SearchingDriverView';
 import { ClientRideHistoryScreen } from './ClientRideHistoryScreen';
 
 const RIDE_RT_LOG = '[ride-realtime]';
@@ -70,27 +73,6 @@ const RIDE_RT_LOG = '[ride-realtime]';
 const BRAND_PRIMARY = '#0f766e';
 const ICON_INACTIVE = '#64748b';
 const NAV_ICON_SIZE = 22;
-
-function usePressScale(toScale = 0.98) {
-  const scale = useRef(new Animated.Value(1)).current;
-  const onPressIn = useCallback(() => {
-    Animated.spring(scale, {
-      toValue: toScale,
-      speed: 28,
-      bounciness: 0,
-      useNativeDriver: true,
-    }).start();
-  }, [scale, toScale]);
-  const onPressOut = useCallback(() => {
-    Animated.spring(scale, {
-      toValue: 1,
-      speed: 28,
-      bounciness: 0,
-      useNativeDriver: true,
-    }).start();
-  }, [scale]);
-  return { scale, onPressIn, onPressOut };
-}
 
 type Props = {
   session: Session;
@@ -384,12 +366,10 @@ function PlacesDestinationSection(props: {
       {showSuggestions ? (
         <View style={styles.suggestionsBox}>
           {suggestions.map((item) => (
-            <Pressable
+            <PressableScale
               key={item.placeId}
-              style={({ pressed }) => [
-                styles.suggestionRow,
-                pressed && styles.suggestionRowPressed,
-              ]}
+              style={styles.suggestionRow}
+              pressedStyle={styles.suggestionRowPressed}
               onPress={() => onPickSuggestion(item)}
             >
               <Text style={styles.suggestionPrimary}>{item.primaryText}</Text>
@@ -398,7 +378,7 @@ function PlacesDestinationSection(props: {
                   {item.secondaryText}
                 </Text>
               ) : null}
-            </Pressable>
+            </PressableScale>
           ))}
         </View>
       ) : null}
@@ -457,15 +437,13 @@ function PlacesPickupSection(props: {
       <Text style={styles.destinationTitle}>Point de départ</Text>
       <Text style={styles.destinationHint}>Choisissez un point de départ.</Text>
 
-      <Pressable
-        style={({ pressed }) => [
-          styles.pickupGpsButton,
-          pressed && styles.pickupGpsButtonPressed,
-        ]}
+      <PressableScale
+        style={styles.pickupGpsButton}
+        pressedStyle={styles.pickupGpsButtonPressed}
         onPress={onUseGpsPress}
       >
         <Text style={styles.pickupGpsButtonText}>Utiliser ma position actuelle</Text>
-      </Pressable>
+      </PressableScale>
 
       {configError ? <Text style={styles.geocodeError}>{configError}</Text> : null}
 
@@ -495,19 +473,17 @@ function PlacesPickupSection(props: {
       {showSuggestions ? (
         <View style={styles.suggestionsBox}>
           {suggestions.map((item) => (
-            <Pressable
+            <PressableScale
               key={item.placeId}
-              style={({ pressed }) => [
-                styles.suggestionRow,
-                pressed && styles.suggestionRowPressed,
-              ]}
+              style={styles.suggestionRow}
+              pressedStyle={styles.suggestionRowPressed}
               onPress={() => onPickSuggestion(item)}
             >
               <Text style={styles.suggestionPrimary}>{item.primaryText}</Text>
               {item.secondaryText ? (
                 <Text style={styles.suggestionSecondary}>{item.secondaryText}</Text>
               ) : null}
-            </Pressable>
+            </PressableScale>
           ))}
         </View>
       ) : null}
@@ -530,6 +506,8 @@ function ClientItineraryModal(props: {
   pickupIsGps: boolean;
   destinationQuery: string;
   onDestinationQueryChange: (v: string) => void;
+  onClearPickup: () => void;
+  onClearDestination: () => void;
   onClose: () => void;
   onUseCurrentLocation: () => void;
   onPickPickup: (item: PlaceSuggestionItem) => Promise<void>;
@@ -543,6 +521,8 @@ function ClientItineraryModal(props: {
     pickupIsGps,
     destinationQuery,
     onDestinationQueryChange,
+    onClearPickup,
+    onClearDestination,
     onClose,
     onUseCurrentLocation,
     onPickPickup,
@@ -614,6 +594,24 @@ function ClientItineraryModal(props: {
   const showSuggestions =
     !picking && current.suggestions.length > 0 && !(active === 'pickup' ? pickupSuspended : destSuspended);
 
+  function handleClearPickup() {
+    onClearPickup();
+    setDetailsError(null);
+    setPickupSuspended(false);
+    setPickupToken(newSessionToken());
+    setActive('pickup');
+    setTimeout(() => pickupRef.current?.focus(), 60);
+  }
+
+  function handleClearDestination() {
+    onClearDestination();
+    setDetailsError(null);
+    setDestSuspended(false);
+    setDestToken(newSessionToken());
+    setActive('destination');
+    setTimeout(() => destRef.current?.focus(), 60);
+  }
+
   async function handlePick(item: PlaceSuggestionItem) {
     Keyboard.dismiss();
     if (configError) return;
@@ -677,14 +675,28 @@ function ClientItineraryModal(props: {
               ]}
             >
               <View style={styles.itinRow}>
-                <Text
-                  style={[
-                    styles.itinRowLabel,
-                    active === 'pickup' && styles.itinRowLabelActive,
-                  ]}
-                >
-                  Prise en charge
-                </Text>
+                <View style={styles.itinRowHeader}>
+                  <Text
+                    style={[
+                      styles.itinRowLabel,
+                      active === 'pickup' && styles.itinRowLabelActive,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    Prise en charge
+                  </Text>
+                  {pickupQuery.trim() ? (
+                    <PressableScale
+                      style={styles.itinClearBtn}
+                      pressedStyle={styles.itinClearBtnPressed}
+                      onPress={handleClearPickup}
+                      accessibilityLabel="Effacer le pickup"
+                      hitSlop={10}
+                    >
+                      <Ionicons name="close" size={16} color="#64748b" />
+                    </PressableScale>
+                  ) : null}
+                </View>
                 <TextInput
                   ref={pickupRef}
                   style={styles.itinPickupInput}
@@ -723,14 +735,28 @@ function ClientItineraryModal(props: {
               ]}
             >
               <View style={styles.itinRow}>
-                <Text
-                  style={[
-                    styles.itinRowLabel,
-                    active === 'destination' && styles.itinRowLabelActive,
-                  ]}
-                >
-                  Destination
-                </Text>
+                <View style={styles.itinRowHeader}>
+                  <Text
+                    style={[
+                      styles.itinRowLabel,
+                      active === 'destination' && styles.itinRowLabelActive,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    Destination
+                  </Text>
+                  {destinationQuery.trim() ? (
+                    <PressableScale
+                      style={styles.itinClearBtn}
+                      pressedStyle={styles.itinClearBtnPressed}
+                      onPress={handleClearDestination}
+                      accessibilityLabel="Effacer la destination"
+                      hitSlop={10}
+                    >
+                      <Ionicons name="close" size={16} color="#64748b" />
+                    </PressableScale>
+                  ) : null}
+                </View>
                 <TextInput
                   ref={destRef}
                   style={styles.itinDestinationInput}
@@ -765,11 +791,9 @@ function ClientItineraryModal(props: {
         ) : null}
 
         <View style={styles.itinSuggestions}>
-          <Pressable
-            style={({ pressed }) => [
-              styles.itinSuggestRow,
-              pressed && styles.itinSuggestRowPressed,
-            ]}
+          <PressableScale
+            style={styles.itinSuggestRow}
+            pressedStyle={styles.itinSuggestRowPressed}
             onPress={() => {
               onUseCurrentLocation();
               setPickupSuspended(true);
@@ -783,23 +807,21 @@ function ClientItineraryModal(props: {
             <Text style={styles.itinSuggestSecondary} numberOfLines={1}>
               {pickupIsGps ? 'Utilisé actuellement' : 'Utiliser la position GPS'}
             </Text>
-          </Pressable>
+          </PressableScale>
 
           {showSuggestions
             ? current.suggestions.map((s) => (
-              <Pressable
+              <PressableScale
                 key={s.placeId}
-                style={({ pressed }) => [
-                  styles.itinSuggestRow,
-                  pressed && styles.itinSuggestRowPressed,
-                ]}
+                style={styles.itinSuggestRow}
+                pressedStyle={styles.itinSuggestRowPressed}
                 onPress={() => void handlePick(s)}
               >
                 <Text style={styles.itinSuggestPrimary}>{s.primaryText}</Text>
                 {s.secondaryText ? (
                   <Text style={styles.itinSuggestSecondary}>{s.secondaryText}</Text>
                 ) : null}
-              </Pressable>
+              </PressableScale>
             ))
             : null}
         </View>
@@ -832,11 +854,28 @@ function ClientHomeMiddleContent(props: {
     refetchOpenRide,
   } = useActiveRide(userId);
 
+  const [uiRideStatus, setUiRideStatus] = useState<
+    'idle' | 'searching_driver'
+  >('idle');
+
   useEffect(() => {
     if (ride && tab !== 'home') {
       setTab('home');
     }
   }, [ride, tab]);
+
+  // Quand la course avance, on quitte l’écran “recherche”.
+  useEffect(() => {
+    if (uiRideStatus !== 'searching_driver') {
+      return;
+    }
+    if (!ride) {
+      return;
+    }
+    if (ride.status !== 'requested') {
+      setUiRideStatus('idle');
+    }
+  }, [uiRideStatus, ride?.id, ride?.status, ride]);
   const location = useClientLocation();
   const [searchInput, setSearchInput] = useState('');
   const [structuredDestination, setStructuredDestination] =
@@ -902,20 +941,30 @@ function ClientHomeMiddleContent(props: {
     }).start();
   }, [sheetAnim]);
 
-  const orderCta = usePressScale(0.98);
-  const payCta = usePressScale(0.98);
+  const estimateCtaAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const shouldShow =
+      !!structuredPickup?.label?.trim() && !!structuredDestination?.label?.trim();
+    if (!shouldShow) {
+      estimateCtaAnim.setValue(0);
+      return;
+    }
+    estimateCtaAnim.setValue(0);
+    Animated.parallel([
+      Animated.spring(estimateCtaAnim, {
+        toValue: 1,
+        speed: 18,
+        bounciness: 7,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [estimateCtaAnim, structuredPickup?.label, structuredDestination?.label]);
 
   // État “trajet déjà choisi” = destination fixée, pas encore de ride.
   // Il doit basculer sur un écran résumé (type Bolt) sans aucune UI de saisie.
   const showBoltTripSummary = !ride && structuredDestination != null;
 
-  function splitAddress(label: string): { primary: string; secondary: string | null } {
-    const raw = label.trim();
-    if (!raw) return { primary: '—', secondary: null };
-    const parts = raw.split(',').map((p) => p.trim()).filter(Boolean);
-    if (parts.length <= 1) return { primary: raw, secondary: null };
-    return { primary: parts[0], secondary: parts.slice(1).join(', ') };
-  }
+  // (UI only) Keep trip labels intact; no normalization here.
 
   const destinationForUi = useMemo((): ClientDestination | null => {
     if (structuredDestination) {
@@ -1413,6 +1462,7 @@ function ClientHomeMiddleContent(props: {
       await registerRideAfterCreate(id);
       void notifyRideEvent({ event: 'ride_created', rideId: id });
       setCancelError(null);
+      setUiRideStatus('searching_driver');
     } catch (e) {
       setOrderError(
         e instanceof Error ? e.message : 'Impossible d’enregistrer la course.'
@@ -1443,12 +1493,14 @@ function ClientHomeMiddleContent(props: {
       void notifyRideEvent({ event: 'ride_cancelled', rideId });
       dismissRide();
       orderRequestInFlightRef.current = false;
+      setUiRideStatus('idle');
     } catch (e) {
       if (e instanceof CancelRideError) {
         setCancelError(e.message);
         if (e.clearPendingRide) {
           dismissRide();
           orderRequestInFlightRef.current = false;
+          setUiRideStatus('idle');
         }
       } else {
         setCancelError(
@@ -1560,6 +1612,7 @@ function ClientHomeMiddleContent(props: {
         latitude: details.latitude,
         longitude: details.longitude,
         placeId: details.placeId,
+        photoName: details.photoName ?? null,
       });
       setSearchInput(displayLabel);
       setSuggestionsSuspended(true);
@@ -1603,6 +1656,7 @@ function ClientHomeMiddleContent(props: {
         latitude: details.latitude,
         longitude: details.longitude,
         placeId: details.placeId,
+        photoName: details.photoName ?? null,
       });
       setPickupSearchInput(displayLabel);
       setPickupSuggestionsSuspended(true);
@@ -1640,23 +1694,43 @@ function ClientHomeMiddleContent(props: {
 
   return (
     <View style={styles.boltRoot}>
-      <ClientMapBlock
-        location={location}
-        variant="fullscreen"
-        pickup={
-          pickupForUi
-            ? {
-                latitude: pickupForUi.latitude,
-                longitude: pickupForUi.longitude,
-                label: pickupForUi.label,
-              }
-            : null
+      {(() => {
+        const map = (
+          <ClientMapBlock
+            location={location}
+            variant="fullscreen"
+            pickup={
+              pickupForUi
+                ? {
+                    latitude: pickupForUi.latitude,
+                    longitude: pickupForUi.longitude,
+                    label: pickupForUi.label,
+                  }
+                : null
+            }
+            destination={destinationForUi}
+            routeMetrics={routeMetrics}
+            driverLat={ride?.driver_lat ?? null}
+            driverLng={ride?.driver_lng ?? null}
+          />
+        );
+
+        const showSearching =
+          tab === 'home' &&
+          (uiRideStatus === 'searching_driver' || ride?.status === 'requested');
+
+        if (!showSearching) {
+          return map;
         }
-        destination={destinationForUi}
-        routeMetrics={routeMetrics}
-        driverLat={ride?.driver_lat ?? null}
-        driverLng={ride?.driver_lng ?? null}
-      />
+
+        return (
+          <SearchingDriverView
+            map={map}
+            cancelling={cancelLoading}
+            onCancel={() => void handleCancelPress()}
+          />
+        );
+      })()}
 
       <LinearGradient
         pointerEvents="none"
@@ -1860,6 +1934,19 @@ function ClientHomeMiddleContent(props: {
         pickupIsGps={pickupChoice === 'gps'}
         destinationQuery={searchInput}
         onDestinationQueryChange={handleSearchChange}
+        onClearPickup={() => {
+          setStructuredPickup(null);
+          setPickupSearchInput('');
+          setPickupChoice('unset');
+          setPickupSuggestionsSuspended(false);
+          setPickupDetailsError(null);
+        }}
+        onClearDestination={() => {
+          setStructuredDestination(null);
+          setSearchInput('');
+          setSuggestionsSuspended(false);
+          setDetailsError(null);
+        }}
         onClose={() => setItineraryOpen(false)}
         onUseCurrentLocation={() => {
           setPickupMode('gps');
@@ -1966,8 +2053,24 @@ function ClientHomeMiddleContent(props: {
               </>
             ) : showBoltTripSummary ? (
               <>
-                <View style={styles.boltPriceCard}>
-                  <Text style={styles.boltPriceLabel}>Estimation</Text>
+                <Animated.View
+                  style={[
+                    styles.boltEstimateWrap,
+                    {
+                      opacity: estimateCtaAnim,
+                      transform: [
+                        {
+                          translateY: estimateCtaAnim.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [50, 0],
+                          }),
+                        },
+                      ],
+                    },
+                  ]}
+                >
+                  <View style={styles.boltPriceCard}>
+                  <Text style={styles.boltPriceLabel}>Tarif</Text>
 
                   <View style={styles.boltTripRow}>
                     <View style={styles.boltTripColLeft}>
@@ -1979,23 +2082,13 @@ function ClientHomeMiddleContent(props: {
                           Départ
                         </Text>
                       </View>
-                      {(() => {
-                        const label =
-                          pickupForUi?.label?.trim() || 'Emplacement actuel';
-                        const a = splitAddress(label);
-                        return (
-                          <>
-                            <Text style={styles.boltTripValuePrimary} numberOfLines={1}>
-                              {a.primary}
-                            </Text>
-                            {a.secondary ? (
-                              <Text style={styles.boltTripValueSecondary} numberOfLines={1}>
-                                {a.secondary}
-                              </Text>
-                            ) : null}
-                          </>
-                        );
-                      })()}
+                      <Text
+                        style={styles.boltTripAddress}
+                        numberOfLines={2}
+                        ellipsizeMode="tail"
+                      >
+                        {pickupForUi?.label?.trim() || 'Emplacement actuel'}
+                      </Text>
                     </View>
 
                     <View style={styles.boltTripArrowCol}>
@@ -2015,34 +2108,13 @@ function ClientHomeMiddleContent(props: {
                           style={[styles.boltTripDot, styles.boltTripDotDest]}
                         />
                       </View>
-                      {(() => {
-                        const label = destinationForUi?.label?.trim() || '—';
-                        const a = splitAddress(label);
-                        return (
-                          <>
-                            <Text
-                              style={[
-                                styles.boltTripValuePrimary,
-                                styles.boltTripValueRight,
-                              ]}
-                              numberOfLines={1}
-                            >
-                              {a.primary}
-                            </Text>
-                            {a.secondary ? (
-                              <Text
-                                style={[
-                                  styles.boltTripValueSecondary,
-                                  styles.boltTripValueRight,
-                                ]}
-                                numberOfLines={1}
-                              >
-                                {a.secondary}
-                              </Text>
-                            ) : null}
-                          </>
-                        );
-                      })()}
+                      <Text
+                        style={[styles.boltTripAddress, styles.boltTripAddressRight]}
+                        numberOfLines={2}
+                        ellipsizeMode="tail"
+                      >
+                        {destinationForUi?.label?.trim() || '—'}
+                      </Text>
                     </View>
                   </View>
 
@@ -2059,7 +2131,16 @@ function ClientHomeMiddleContent(props: {
                     </Text>
                   ) : null}
 
-                </View>
+                  {routeMetrics.distanceKm != null &&
+                  routeMetrics.durationMinutes != null ? (
+                    <Text style={styles.boltPriceMeta}>
+                      {routeMetrics.durationMinutes} min •{' '}
+                      {routeMetrics.distanceKm.toLocaleString('fr-FR')} km
+                    </Text>
+                  ) : null}
+
+                  </View>
+                </Animated.View>
               </>
             ) : (
               <>
@@ -2137,64 +2218,72 @@ function ClientHomeMiddleContent(props: {
           ) : null}
 
           {/* ÉTAT RÉSUMÉ (Bolt): uniquement Commander (pas d’état ride / pas de texte) */}
-          {showBoltTripSummary && structuredDestination ? (
-            <Animated.View
-              style={{
-                transform: [{ scale: orderCta.scale }],
-              }}
+          {structuredDestination ? (
+            <PressableScale
+              style={[
+                styles.orderButtonPremium,
+                (!canOrder || orderLoading || hasOpenRide) &&
+                  styles.orderButtonPremiumDisabled,
+              ]}
+              pressedStyle={styles.orderButtonPressed}
+              disabledStyle={styles.orderButtonPremiumDisabled}
+              disabled={!canOrder || orderLoading || hasOpenRide}
+              onPress={() => void handleOrderPress()}
             >
-              <Pressable
-                style={({ pressed }) => [
-                  styles.orderButton,
-                  (!canOrder || orderLoading || hasOpenRide) &&
-                    styles.orderButtonDisabled,
-                  pressed &&
-                    canOrder &&
-                    !orderLoading &&
-                    !hasOpenRide &&
-                    styles.orderButtonPressed,
-                ]}
-                disabled={!canOrder || orderLoading || hasOpenRide}
-                onPressIn={orderCta.onPressIn}
-                onPressOut={orderCta.onPressOut}
-                onPress={() => void handleOrderPress()}
-              >
-                {orderLoading ? (
+              {orderLoading || (ride?.status === 'requested' && !ride.driver_id) ? (
+                <View style={styles.orderButtonLoadingRow}>
                   <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.orderButtonLabel}>Commander</Text>
-                )}
-              </Pressable>
-            </Animated.View>
-          ) : structuredDestination ? (
-            <Animated.View
-              style={{
-                transform: [{ scale: orderCta.scale }],
-              }}
-            >
-              <Pressable
-                style={({ pressed }) => [
-                  styles.orderButton,
-                  (!canOrder || orderLoading || hasOpenRide) &&
-                    styles.orderButtonDisabled,
-                  pressed &&
-                    canOrder &&
-                    !orderLoading &&
-                    !hasOpenRide &&
-                    styles.orderButtonPressed,
-                ]}
-                disabled={!canOrder || orderLoading || hasOpenRide}
-                onPressIn={orderCta.onPressIn}
-                onPressOut={orderCta.onPressOut}
-                onPress={() => void handleOrderPress()}
-              >
-                {orderLoading ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.orderButtonLabel}>Commander</Text>
-                )}
-              </Pressable>
-            </Animated.View>
+                  <Text style={styles.orderButtonLabel}>
+                    Recherche d’un chauffeur…
+                  </Text>
+                </View>
+              ) : (
+                <Text style={styles.orderButtonLabel}>Commander</Text>
+              )}
+            </PressableScale>
+          ) : null}
+
+          {/* UX "driver arriving" (UI-only) */}
+          {!showBoltTripSummary && ride?.status === 'requested' ? (
+            <View style={styles.driverArrivingCard}>
+              <View style={styles.driverArrivingTop}>
+                <Ionicons name="car" size={18} color={BRAND_PRIMARY} />
+                <Text style={styles.driverArrivingTitle}>Recherche d’un chauffeur…</Text>
+              </View>
+              <Text style={styles.driverArrivingHint}>
+                {driverHint ?? 'Nous vous mettons en relation avec un chauffeur.'}
+              </Text>
+            </View>
+          ) : null}
+
+          {!showBoltTripSummary && ride?.status === 'awaiting_payment' ? (
+            <View style={styles.driverArrivingCard}>
+              <View style={styles.driverArrivingTop}>
+                <Ionicons name="car" size={18} color={BRAND_PRIMARY} />
+                <Text style={styles.driverArrivingTitle}>Chauffeur trouvé</Text>
+              </View>
+              <Text style={styles.driverArrivingMeta}>
+                {ride.driver_id ? 'Chauffeur assigné' : 'Chauffeur en cours…'} · ETA : —
+              </Text>
+              <View style={styles.driverArrivingActions}>
+                <PressableScale
+                  style={styles.driverActionBtn}
+                  pressedStyle={styles.driverActionBtnPressed}
+                  disabled
+                >
+                  <Ionicons name="call" size={18} color="#94a3b8" />
+                  <Text style={styles.driverActionTextDisabled}>Appeler</Text>
+                </PressableScale>
+                <PressableScale
+                  style={styles.driverActionBtn}
+                  pressedStyle={styles.driverActionBtnPressed}
+                  disabled
+                >
+                  <Ionicons name="chatbubble" size={18} color="#94a3b8" />
+                  <Text style={styles.driverActionTextDisabled}>Message</Text>
+                </PressableScale>
+              </View>
+            </View>
           ) : null}
           {!destinationForUi && ride != null ? (
             <Text style={styles.orderHint}>
@@ -2282,20 +2371,16 @@ function ClientHomeMiddleContent(props: {
                 (iOS/Android), pas dans le navigateur.
               </Text>
             ) : (
-              <Animated.View style={{ transform: [{ scale: payCta.scale }] }}>
-                <Pressable
-                  style={({ pressed }) => [
-                    styles.orderPayButton,
-                    paymentSheetLoading && styles.orderButtonDisabled,
-                    pressed &&
-                      !paymentSheetLoading &&
-                      styles.orderPayButtonPressed,
-                  ]}
-                  disabled={paymentSheetLoading}
-                  onPressIn={payCta.onPressIn}
-                  onPressOut={payCta.onPressOut}
-                  onPress={() => void handlePayPress()}
-                >
+              <PressableScale
+                style={[
+                  styles.orderPayButton,
+                  paymentSheetLoading && styles.orderButtonDisabled,
+                ]}
+                pressedStyle={styles.orderPayButtonPressed}
+                disabledStyle={styles.orderButtonDisabled}
+                onPress={() => void handlePayPress()}
+                disabled={paymentSheetLoading}
+              >
                   {paymentSheetLoading ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
@@ -2307,8 +2392,7 @@ function ClientHomeMiddleContent(props: {
                         : ''}
                     </Text>
                   )}
-                </Pressable>
-              </Animated.View>
+              </PressableScale>
             )
           ) : null}
           {paymentError ? (
@@ -2608,26 +2692,29 @@ const styles = StyleSheet.create({
     marginTop: 6,
     marginBottom: 6,
   },
+  boltEstimateWrap: {
+    width: '100%',
+  },
   boltTripRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
     marginBottom: 14,
   },
   boltTripColLeft: {
-    width: '40%',
+    flex: 1,
     alignItems: 'flex-start',
   },
   boltTripColRight: {
-    width: '40%',
+    flex: 1,
     alignItems: 'flex-end',
   },
   boltTripArrowCol: {
-    width: '20%',
+    width: 40,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingTop: 18,
+    paddingTop: 0,
   },
   boltTripLabelRow: {
     flexDirection: 'row',
@@ -2651,20 +2738,13 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     flexShrink: 1,
   },
-  boltTripValuePrimary: {
+  boltTripAddress: {
     fontSize: 14,
     fontWeight: '800',
     color: '#0f172a',
     lineHeight: 18,
   },
-  boltTripValueSecondary: {
-    marginTop: 4,
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#64748b',
-    lineHeight: 18,
-  },
-  boltTripValueRight: {
+  boltTripAddressRight: {
     textAlign: 'right',
     alignSelf: 'flex-end',
   },
@@ -2681,23 +2761,33 @@ const styles = StyleSheet.create({
   },
   boltPriceLabel: {
     fontSize: 12,
-    fontWeight: '800',
+    fontWeight: '900',
     color: '#64748b',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: 8,
+    textAlign: 'center',
   },
   boltPriceValue: {
     fontSize: 28,
     fontWeight: '900',
     color: BRAND_PRIMARY,
     letterSpacing: -0.5,
+    textAlign: 'center',
   },
   boltPriceSub: {
     marginTop: 4,
     fontSize: 14,
     fontWeight: '700',
     color: '#64748b',
+    textAlign: 'center',
+  },
+  boltPriceMeta: {
+    marginTop: 8,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#64748b',
+    textAlign: 'center',
   },
   boltZones: {
     marginTop: 10,
@@ -2834,6 +2924,23 @@ const styles = StyleSheet.create({
   itinRow: {
     minHeight: 56,
     justifyContent: 'center',
+  },
+  itinRowHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  itinClearBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 999,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  itinClearBtnPressed: {
+    opacity: 0.9,
   },
   itinRowLabel: {
     fontSize: 12,
@@ -3305,6 +3412,83 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     minHeight: 48,
     marginTop: 16,
+  },
+  orderButtonPremium: {
+    width: '100%',
+    height: 56,
+    borderRadius: 999,
+    backgroundColor: BRAND_PRIMARY,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 14,
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
+  orderButtonPremiumDisabled: {
+    backgroundColor: '#e2e8f0',
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  orderButtonLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  driverArrivingCard: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 16,
+    backgroundColor: '#fff',
+    padding: 14,
+  },
+  driverArrivingTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  driverArrivingTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#0f172a',
+  },
+  driverArrivingHint: {
+    marginTop: 8,
+    color: '#64748b',
+    fontWeight: '600',
+    lineHeight: 18,
+  },
+  driverArrivingMeta: {
+    marginTop: 8,
+    color: '#64748b',
+    fontWeight: '700',
+  },
+  driverArrivingActions: {
+    marginTop: 12,
+    flexDirection: 'row',
+    gap: 10,
+  },
+  driverActionBtn: {
+    flex: 1,
+    height: 44,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#f8fafc',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+  },
+  driverActionBtnPressed: {
+    opacity: 0.92,
+  },
+  driverActionTextDisabled: {
+    color: '#94a3b8',
+    fontWeight: '800',
   },
   orderButtonPressed: {
     opacity: 0.92,

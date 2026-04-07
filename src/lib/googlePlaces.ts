@@ -192,12 +192,19 @@ type PlaceDetailsRaw = {
   displayName?: { text?: string };
   formattedAddress?: string;
   location?: { latitude?: number; longitude?: number };
+  photos?: { name?: string }[];
 };
 
 export async function fetchPlaceDetails(params: {
   placeId: string;
   sessionToken: string;
-}): Promise<{ label: string; latitude: number; longitude: number; placeId: string }> {
+}): Promise<{
+  label: string;
+  latitude: number;
+  longitude: number;
+  placeId: string;
+  photoName?: string | null;
+}> {
   const key = getApiKey();
   const id = encodeURIComponent(params.placeId);
   const token = encodeURIComponent(params.sessionToken);
@@ -207,7 +214,7 @@ export async function fetchPlaceDetails(params: {
     method: 'GET',
     headers: {
       'X-Goog-Api-Key': key,
-      'X-Goog-FieldMask': 'id,displayName,formattedAddress,location',
+      'X-Goog-FieldMask': 'id,displayName,formattedAddress,location,photos',
     },
   });
 
@@ -227,10 +234,13 @@ export async function fetchPlaceDetails(params: {
     raw.displayName?.text?.trim() ||
     'Destination';
 
+  const photoName = raw.photos?.[0]?.name ?? null;
+
   return {
     label,
     latitude: lat,
     longitude: lng,
     placeId: raw.id?.replace(/^places\//, '') ?? params.placeId,
+    photoName,
   };
 }

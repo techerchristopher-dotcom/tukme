@@ -5,4 +5,6 @@ export type ClientDestination = {
   longitude: number;
   /** Place ID Google (Places API), utile pour la suite (trajet, cache…). */
   placeId?: string;
+  /** Photo principale (Places API New) si disponible. */
+  photoName?: string | null;
 };
