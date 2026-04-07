@@ -23,7 +23,7 @@ import {
   rpcStartRide,
 } from '../lib/driverRideProgress';
 import { notifyRideEvent } from '../lib/pushNotifications';
-import { supabase } from '../lib/supabase';
+import { supabase, syncRealtimeAuth } from '../lib/supabase';
 import type { Profile } from '../types/profile';
 
 type Props = {
@@ -89,6 +89,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
   const [rides, setRides] = useState<AssignedRideRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
+  const [realtimeError, setRealtimeError] = useState<string | null>(null);
   const [releasingId, setReleasingId] = useState<string | null>(null);
   const [postPaidActionId, setPostPaidActionId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -156,12 +157,45 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
           void fetchMine();
         }
       )
-      .subscribe();
+      .subscribe((status, err) => {
+        if (status === 'SUBSCRIBED') {
+          setRealtimeError(null);
+          return;
+        }
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          const detail = err?.message?.trim();
+          setRealtimeError(
+            detail ||
+              (status === 'TIMED_OUT'
+                ? 'Connexion temps réel indisponible (délai dépassé).'
+                : 'Connexion temps réel indisponible. Vérifiez la publication Realtime et votre session.')
+          );
+          // Fallback minimal: refetch immédiat pour éviter un écran “mort”.
+          void fetchMine();
+        }
+      });
 
     return () => {
       void supabase.removeChannel(channel);
     };
   }, [fetchMine]);
+
+  // Synchronise l’auth Realtime avant subscription (pattern utilisé côté client).
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const ok = await syncRealtimeAuth();
+      if (cancelled) return;
+      if (!ok) {
+        setRealtimeError(
+          'Connexion temps réel indisponible : session introuvable. Reconnectez-vous.'
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [driverId]);
 
   async function handlePostPaidStep(
     rideId: string,
@@ -274,6 +308,9 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
   return (
     <View style={[styles.driverBlock, styles.driverBlockSpaced]}>
       <Text style={styles.driverTitle}>Mes courses</Text>
+      {realtimeError ? (
+        <Text style={styles.driverError}>{realtimeError}</Text>
+      ) : null}
       {actionError ? (
         <Text style={styles.driverError}>{actionError}</Text>
       ) : null}
@@ -412,6 +449,7 @@ function DriverRequestsBlock() {
   const [rides, setRides] = useState<OpenRideRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
+  const [realtimeError, setRealtimeError] = useState<string | null>(null);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -449,12 +487,43 @@ function DriverRequestsBlock() {
           void fetchOpen();
         }
       )
-      .subscribe();
+      .subscribe((status, err) => {
+        if (status === 'SUBSCRIBED') {
+          setRealtimeError(null);
+          return;
+        }
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          const detail = err?.message?.trim();
+          setRealtimeError(
+            detail ||
+              (status === 'TIMED_OUT'
+                ? 'Connexion temps réel indisponible (délai dépassé).'
+                : 'Connexion temps réel indisponible. Vérifiez la publication Realtime et votre session.')
+          );
+          void fetchOpen();
+        }
+      });
 
     return () => {
       void supabase.removeChannel(channel);
     };
   }, [fetchOpen]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const ok = await syncRealtimeAuth();
+      if (cancelled) return;
+      if (!ok) {
+        setRealtimeError(
+          'Connexion temps réel indisponible : session introuvable. Reconnectez-vous.'
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function handleAccept(rideId: string) {
     if (acceptingId) {
@@ -516,6 +585,9 @@ function DriverRequestsBlock() {
   return (
     <View style={styles.driverBlock}>
       <Text style={styles.driverTitle}>Demandes ouvertes</Text>
+      {realtimeError ? (
+        <Text style={styles.driverError}>{realtimeError}</Text>
+      ) : null}
       {actionError ? (
         <Text style={styles.driverError}>{actionError}</Text>
       ) : null}
