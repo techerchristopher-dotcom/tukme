@@ -6,7 +6,7 @@ import type { ClientRideSnapshot, ClientRideStatus } from '../types/clientRide';
 const LOG = '[ride-realtime]';
 
 const RIDE_SELECT_COLUMNS =
-  'id, status, driver_id, updated_at, driver_lat, driver_lng, driver_location_updated_at, pickup_label, destination_label, destination_lat, destination_lng, destination_place_id, estimated_price_eur, payment_expires_at, ride_completed_at';
+  'id, status, driver_id, updated_at, driver_lat, driver_lng, driver_location_updated_at, pickup_label, destination_label, destination_lat, destination_lng, destination_place_id, passenger_count, estimated_price_eur, payment_expires_at, ride_completed_at';
 
 const OPEN_STATUSES: ClientRideStatus[] = [
   'requested',
@@ -43,6 +43,15 @@ function num(v: unknown): number | undefined {
     return Number.isFinite(n) ? n : undefined;
   }
   return undefined;
+}
+
+function intFromRow(v: unknown): number | undefined {
+  const n = num(v);
+  if (n === undefined) {
+    return undefined;
+  }
+  const t = Math.trunc(n);
+  return Number.isFinite(t) ? t : undefined;
 }
 
 /**
@@ -125,6 +134,15 @@ function buildRideSnapshot(
         ? (row.destination_place_id as string | null)
         : prev?.destination_place_id ?? null;
 
+  let passenger_count: number;
+  if (row.passenger_count === undefined) {
+    passenger_count = prev?.passenger_count ?? 1;
+  } else {
+    const pc = intFromRow(row.passenger_count);
+    passenger_count =
+      pc != null && pc >= 1 ? pc : (prev?.passenger_count ?? 1);
+  }
+
   let estimated_price_eur: number | null;
   if (row.estimated_price_eur === undefined) {
     estimated_price_eur = prev?.estimated_price_eur ?? null;
@@ -181,6 +199,7 @@ function buildRideSnapshot(
     destination_lat: destLat,
     destination_lng: destLng,
     destination_place_id: destPlace,
+    passenger_count,
     estimated_price_eur,
     payment_expires_at,
     ride_completed_at,

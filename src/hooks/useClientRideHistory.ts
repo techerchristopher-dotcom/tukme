@@ -10,6 +10,8 @@ export type ClientRideHistoryRow = {
   pickup_label: string | null;
   destination_label: string;
   estimated_price_eur: number | null;
+  /** Stocké pour usage futur (liste MVP inchangée). */
+  passenger_count: number | null;
   ride_completed_at: string | null;
 };
 
@@ -53,7 +55,7 @@ export function useClientRideHistory(userId: string): {
       const q = supabase
         .from('rides')
         .select(
-          'id, created_at, status, pickup_label, destination_label, estimated_price_eur, ride_completed_at'
+          'id, created_at, status, pickup_label, destination_label, estimated_price_eur, passenger_count, ride_completed_at'
         )
         .eq('client_id', userId)
         .in('status', TERMINAL)

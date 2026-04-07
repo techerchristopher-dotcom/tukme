@@ -31,6 +31,8 @@ export type ClientRideSnapshot = {
   destination_place_id: string | null;
   /** Libellé départ persisté en base (peut être null si reverse geocode a échoué). */
   pickup_label: string | null;
+  /** Nombre de passagers (MVP 1–4). */
+  passenger_count: number;
   /** Estimation EUR persistée (paiement Edge Function). */
   estimated_price_eur: number | null;
   /** Fin de fenêtre de paiement (UTC, ISO) ; défini une seule fois côté serveur. */

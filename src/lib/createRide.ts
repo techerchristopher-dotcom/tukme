@@ -19,6 +19,8 @@ export type RequestedRideInsert = {
   destination_place_id: string | null;
   pickup_zone: string | null;
   destination_zone: string | null;
+  /** Nombre de passagers (MVP : 1–4), aligné `rides.passenger_count`. */
+  passenger_count: number;
   estimated_price_ariary: number;
   estimated_price_eur: number;
   pricing_mode: 'normal' | 'fallback';

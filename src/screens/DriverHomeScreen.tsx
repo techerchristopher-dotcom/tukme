@@ -37,6 +37,7 @@ type OpenRideRow = {
   destination_label: string;
   pickup_label: string | null;
   estimated_price_eur: number | null;
+  passenger_count: number;
   created_at: string;
 };
 
@@ -44,15 +45,16 @@ type AssignedRideRow = {
   id: string;
   destination_label: string;
   estimated_price_eur: number | null;
+  passenger_count: number;
   status: string;
   payment_expires_at: string | null;
 };
 
 const SELECT_OPEN =
-  'id, destination_label, pickup_label, estimated_price_eur, created_at, status';
+  'id, destination_label, pickup_label, estimated_price_eur, passenger_count, created_at, status';
 
 const SELECT_ASSIGNED =
-  'id, destination_label, estimated_price_eur, status, payment_expires_at, updated_at';
+  'id, destination_label, estimated_price_eur, passenger_count, status, payment_expires_at, updated_at';
 
 function formatEur(eur: number | null): string {
   if (eur == null || !Number.isFinite(eur)) {
@@ -281,6 +283,9 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
             {r.destination_label || 'Destination'}
           </Text>
           <Text style={styles.ridePrice}>{formatEur(r.estimated_price_eur)}</Text>
+          <Text style={styles.ridePassengers}>
+            Passagers : {r.passenger_count ?? 1}
+          </Text>
           <Text style={styles.assignmentStatus}>
             {driverAssignmentStatusMessage(r.status)}
           </Text>
@@ -525,6 +530,9 @@ function DriverRequestsBlock() {
             </Text>
           ) : null}
           <Text style={styles.ridePrice}>{formatEur(r.estimated_price_eur)}</Text>
+          <Text style={styles.ridePassengers}>
+            Passagers : {r.passenger_count ?? 1}
+          </Text>
           <Pressable
             style={({ pressed }) => [
               styles.acceptBtn,
@@ -629,6 +637,12 @@ const styles = StyleSheet.create({
   ridePrice: {
     fontSize: 14,
     color: '#0f766e',
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  ridePassengers: {
+    fontSize: 13,
+    color: '#64748b',
     fontWeight: '600',
     marginBottom: 10,
   },

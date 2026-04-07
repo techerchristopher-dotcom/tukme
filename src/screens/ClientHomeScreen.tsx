@@ -35,6 +35,12 @@ import {
 } from 'react-native';
 import { PressableScale } from '../components/PressableScale';
 import {
+  PASSENGER_COUNT_MAX_MVP,
+  PASSENGER_COUNT_MIN_MVP,
+  multiplyBasePriceAriary,
+  multiplyBasePriceEur,
+} from '../constants/passengerCount';
+import {
   type ClientLocationState,
   useClientLocation,
 } from '../hooks/useClientLocation';
@@ -905,6 +911,10 @@ function ClientHomeMiddleContent(props: {
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [pickupLabel, setPickupLabel] = useState<string | null>(null);
   const [orderLoading, setOrderLoading] = useState(false);
+  /** MVP : 1–4 passagers, sélecteur sur le résumé trajet uniquement. */
+  const [passengerCount, setPassengerCount] = useState(
+    PASSENGER_COUNT_MIN_MVP
+  );
   const [orderError, setOrderError] = useState<string | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -1047,6 +1057,8 @@ function ClientHomeMiddleContent(props: {
       } else {
         setPickupMode('manual');
       }
+
+      setPassengerCount(PASSENGER_COUNT_MIN_MVP);
 
       setTerminalSummary(null);
       setShowCompletionModal(false);
@@ -1239,6 +1251,28 @@ function ClientHomeMiddleContent(props: {
     destination: destinationForUi,
   });
 
+  const displayPriceEuro = useMemo(() => {
+    if (!ridePricing || ridePricing.pricingMode === 'loading') {
+      return null;
+    }
+    const b = ridePricing.estimatedPriceEuro;
+    if (!Number.isFinite(b)) {
+      return null;
+    }
+    return multiplyBasePriceEur(b, passengerCount);
+  }, [ridePricing, passengerCount]);
+
+  const displayPriceAriary = useMemo(() => {
+    if (!ridePricing || ridePricing.pricingMode === 'loading') {
+      return null;
+    }
+    const b = ridePricing.estimatedPriceAriary;
+    if (!Number.isFinite(b)) {
+      return null;
+    }
+    return multiplyBasePriceAriary(b, passengerCount);
+  }, [ridePricing, passengerCount]);
+
   const [rideOtp, setRideOtp] = useState<string | null>(null);
   const [rideOtpError, setRideOtpError] = useState<string | null>(null);
   const otpFetchedForRideIdRef = useRef<string | null>(null);
@@ -1375,6 +1409,7 @@ function ClientHomeMiddleContent(props: {
     } else {
       setPickupMode('manual');
     }
+    setPassengerCount(PASSENGER_COUNT_MIN_MVP);
   }
 
   function openItineraryFromSummary() {
@@ -1452,8 +1487,15 @@ function ClientHomeMiddleContent(props: {
         destination_place_id: destinationForUi.placeId ?? null,
         pickup_zone: ridePricing.pickupZone,
         destination_zone: ridePricing.destinationZone,
-        estimated_price_ariary: ridePricing.estimatedPriceAriary,
-        estimated_price_eur: ridePricing.estimatedPriceEuro,
+        passenger_count: passengerCount,
+        estimated_price_ariary: multiplyBasePriceAriary(
+          ridePricing.estimatedPriceAriary,
+          passengerCount
+        ),
+        estimated_price_eur: multiplyBasePriceEur(
+          ridePricing.estimatedPriceEuro,
+          passengerCount
+        ),
         pricing_mode: pricingMode,
         estimated_distance_m: Math.round(routeMetrics.distanceMeters),
         estimated_duration_s: Math.round(routeMetrics.durationSeconds),
@@ -1723,6 +1765,7 @@ function ClientHomeMiddleContent(props: {
         map={mapElement}
         cancelling={cancelLoading}
         onCancel={() => void handleCancelPress()}
+        passengerCount={ride?.passenger_count ?? passengerCount}
       />
     );
   }
@@ -2117,16 +2160,59 @@ function ClientHomeMiddleContent(props: {
                     </View>
                   </View>
 
+                  <View style={styles.passengerRow}>
+                    <Text style={styles.passengerRowLabel}>Passagers</Text>
+                    <View style={styles.passengerStepper}>
+                      <PressableScale
+                        style={[
+                          styles.passengerStepBtn,
+                          passengerCount <= PASSENGER_COUNT_MIN_MVP &&
+                            styles.passengerStepBtnDisabled,
+                        ]}
+                        pressedStyle={styles.passengerStepBtnPressed}
+                        disabledStyle={styles.passengerStepBtnDisabled}
+                        disabled={passengerCount <= PASSENGER_COUNT_MIN_MVP}
+                        onPress={() =>
+                          setPassengerCount((c) =>
+                            Math.max(PASSENGER_COUNT_MIN_MVP, c - 1)
+                          )
+                        }
+                        accessibilityLabel="Diminuer le nombre de passagers"
+                      >
+                        <Text style={styles.passengerStepBtnText}>−</Text>
+                      </PressableScale>
+                      <Text style={styles.passengerCountValue}>
+                        {passengerCount}
+                      </Text>
+                      <PressableScale
+                        style={[
+                          styles.passengerStepBtn,
+                          passengerCount >= PASSENGER_COUNT_MAX_MVP &&
+                            styles.passengerStepBtnDisabled,
+                        ]}
+                        pressedStyle={styles.passengerStepBtnPressed}
+                        disabledStyle={styles.passengerStepBtnDisabled}
+                        disabled={passengerCount >= PASSENGER_COUNT_MAX_MVP}
+                        onPress={() =>
+                          setPassengerCount((c) =>
+                            Math.min(PASSENGER_COUNT_MAX_MVP, c + 1)
+                          )
+                        }
+                        accessibilityLabel="Augmenter le nombre de passagers"
+                      >
+                        <Text style={styles.passengerStepBtnText}>+</Text>
+                      </PressableScale>
+                    </View>
+                  </View>
+
                   <Text style={styles.boltPriceValue}>
-                    {ridePricing?.estimatedPriceEuro != null &&
-                    Number.isFinite(ridePricing.estimatedPriceEuro)
-                      ? `${ridePricing.estimatedPriceEuro.toFixed(2)} €`
+                    {displayPriceEuro != null
+                      ? `${displayPriceEuro.toFixed(2)} €`
                       : '—'}
                   </Text>
-                  {ridePricing?.estimatedPriceAriary != null &&
-                  Number.isFinite(ridePricing.estimatedPriceAriary) ? (
+                  {displayPriceAriary != null ? (
                     <Text style={styles.boltPriceSub}>
-                      {formatAriary(ridePricing.estimatedPriceAriary)} Ar
+                      {formatAriary(displayPriceAriary)} Ar
                     </Text>
                   ) : null}
 
@@ -2264,6 +2350,9 @@ function ClientHomeMiddleContent(props: {
               <Text style={styles.driverArrivingMeta}>
                 {ride.driver_id ? 'Chauffeur assigné' : 'Chauffeur en cours…'} · ETA : —
               </Text>
+              <Text style={styles.passengersReadOnly}>
+                Passagers : {ride.passenger_count}
+              </Text>
               <View style={styles.driverArrivingActions}>
                 <PressableScale
                   style={styles.driverActionBtn}
@@ -2329,6 +2418,16 @@ function ClientHomeMiddleContent(props: {
               }
             >
               {clientRideStatusMessage(ride.status)}
+            </Text>
+          ) : null}
+          {!showBoltTripSummary &&
+          ride &&
+          (ride.status === 'paid' ||
+            ride.status === 'en_route' ||
+            ride.status === 'arrived' ||
+            ride.status === 'in_progress') ? (
+            <Text style={styles.passengersReadOnly}>
+              Passagers : {ride.passenger_count}
             </Text>
           ) : null}
           {ride?.status === 'in_progress' ? (
@@ -2787,6 +2886,55 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#64748b',
     textAlign: 'center',
+  },
+  passengerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  passengerRowLabel: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  passengerStepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  passengerStepBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 999,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  passengerStepBtnPressed: {
+    backgroundColor: '#e2e8f0',
+  },
+  passengerStepBtnDisabled: {
+    opacity: 0.45,
+  },
+  passengerStepBtnText: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#0f172a',
+    marginTop: -2,
+  },
+  passengerCountValue: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#0f172a',
+    minWidth: 28,
+    textAlign: 'center',
+  },
+  passengersReadOnly: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+    marginTop: 8,
   },
   boltZones: {
     marginTop: 10,

@@ -7,15 +7,23 @@ type Props = {
   map: ReactNode;
   onCancel: () => void;
   cancelling: boolean;
+  /** Affichage lecture seule après commande (snapshot `rides.passenger_count`). */
+  passengerCount: number;
 };
 
-export function SearchingDriverView({ map, onCancel, cancelling }: Props) {
+export function SearchingDriverView({
+  map,
+  onCancel,
+  cancelling,
+  passengerCount,
+}: Props) {
   return (
     <View style={styles.root}>
       {map}
       <View style={styles.bottomSheet}>
         <View style={styles.grabber} />
         <Text style={styles.title}>Recherche d’un chauffeur…</Text>
+        <Text style={styles.passengersLine}>Passagers : {passengerCount}</Text>
         <Text style={styles.subtitle}>
           Nous recherchons un chauffeur proche de vous
         </Text>
@@ -73,6 +81,12 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     color: '#0f172a',
     marginBottom: 6,
+  },
+  passengersLine: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#334155',
+    marginBottom: 4,
   },
   subtitle: {
     fontSize: 13,
