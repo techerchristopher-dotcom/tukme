@@ -54,6 +54,7 @@ import type { ClientRideStatus } from '../types/clientRide';
 import type { ClientDestination } from '../types/clientDestination';
 import type { RidePricingEstimate } from '../types/ridePricing';
 import type { Profile } from '../types/profile';
+import { ClientRideHistoryScreen } from './ClientRideHistoryScreen';
 
 const RIDE_RT_LOG = '[ride-realtime]';
 
@@ -485,6 +486,7 @@ function ClientHomeMiddleContent(props: {
   stripePublishableConfigured: boolean;
 }) {
   const { userId, stripePublishableConfigured } = props;
+  const [view, setView] = useState<'home' | 'history'>('home');
   const { initPaymentSheet, presentPaymentSheet } = useClientStripeSheet();
   const {
     ride,
@@ -496,6 +498,12 @@ function ClientHomeMiddleContent(props: {
     dismissRide,
     refetchOpenRide,
   } = useActiveRide(userId);
+
+  useEffect(() => {
+    if (ride && view === 'history') {
+      setView('home');
+    }
+  }, [ride, view]);
   const location = useClientLocation();
   const [searchInput, setSearchInput] = useState('');
   const [structuredDestination, setStructuredDestination] =
@@ -532,6 +540,7 @@ function ClientHomeMiddleContent(props: {
   /** Horloge pour le compte à rebours (alignée sur `payment_expires_at` serveur). */
   const [payClock, setPayClock] = useState(() => Date.now());
   const paymentExpirySyncDoneRef = useRef<string | null>(null);
+  const terminalCleanupForRideIdRef = useRef<string | null>(null);
 
   const destinationForUi = useMemo((): ClientDestination | null => {
     if (structuredDestination) {
@@ -580,6 +589,64 @@ function ClientHomeMiddleContent(props: {
     }
     return null;
   }, [pickupMode, structuredPickup, location, pickupLabel]);
+
+  useEffect(() => {
+    const rideId = ride?.id ?? null;
+    const st = ride?.status ?? null;
+    const isTerminal =
+      st === 'completed' ||
+      st === 'cancelled_by_client' ||
+      st === 'cancelled_by_driver' ||
+      st === 'expired';
+    if (!rideId || !isTerminal) {
+      terminalCleanupForRideIdRef.current = null;
+      return;
+    }
+    if (terminalCleanupForRideIdRef.current === rideId) {
+      return;
+    }
+    terminalCleanupForRideIdRef.current = rideId;
+
+    // Débloque immédiatement une nouvelle commande (sans attendre un timer Realtime).
+    orderRequestInFlightRef.current = false;
+    cancelRequestInFlightRef.current = false;
+    paymentInFlightRef.current = false;
+    setOrderLoading(false);
+    setOrderError(null);
+    setCancelLoading(false);
+    setCancelError(null);
+    setPaymentError(null);
+    setPaymentSheetLoading(false);
+    setPaymentConfirmPending(false);
+    setRideOtp(null);
+    setRideOtpError(null);
+    otpFetchedForRideIdRef.current = null;
+
+    // Réinitialise la sélection destination/pickup (la position GPS reste intacte).
+    setStructuredDestination(null);
+    setSearchInput('');
+    setSuggestionsSuspended(false);
+    setDetailsError(null);
+    setStructuredPickup(null);
+    setPickupSearchInput('');
+    setPickupSuggestionsSuspended(false);
+    setPickupDetailsError(null);
+    if (location.phase === 'ready') {
+      setPickupMode('gps');
+    } else {
+      setPickupMode('manual');
+    }
+
+    // Nettoie la ride active (retour à l'état prêt à commander).
+    dismissRide();
+  }, [
+    ride?.id,
+    ride?.status,
+    location.phase,
+    dismissRide,
+    setRideOtp,
+    setRideOtpError,
+  ]);
 
   useEffect(() => {
     if (!ride || !hasOpenRide) {
@@ -1119,6 +1186,15 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
+  if (view === 'history') {
+    return (
+      <ClientRideHistoryScreen
+        userId={userId}
+        onBack={() => setView('home')}
+      />
+    );
+  }
+
   return (
     <>
       <TripSummaryCard
@@ -1127,6 +1203,15 @@ function ClientHomeMiddleContent(props: {
         pickup={pickupForUi}
         destination={destinationForUi}
       />
+      <Pressable
+        style={({ pressed }) => [
+          styles.historyButton,
+          pressed && styles.historyButtonPressed,
+        ]}
+        onPress={() => setView('history')}
+      >
+        <Text style={styles.historyButtonText}>Mes courses</Text>
+      </Pressable>
       <ClientMapBlock
         location={location}
         pickup={
@@ -1476,6 +1561,24 @@ const styles = StyleSheet.create({
     color: '#0f172a',
     backgroundColor: '#f8fafc',
     marginBottom: 8,
+  },
+  historyButton: {
+    width: '100%',
+    maxWidth: 400,
+    marginBottom: 12,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: '#0f766e',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  historyButtonPressed: {
+    opacity: 0.92,
+  },
+  historyButtonText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 16,
   },
   pickupManualButton: {
     width: '100%',
