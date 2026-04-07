@@ -516,6 +516,7 @@ function ClientItineraryModal(props: {
   onClearPickup: () => void;
   onClearDestination: () => void;
   onClose: () => void;
+  onValidate: () => void;
   onUseCurrentLocation: () => void;
   onPickPickup: (item: PlaceSuggestionItem) => Promise<void>;
   onPickDestination: (item: PlaceSuggestionItem) => Promise<void>;
@@ -531,6 +532,7 @@ function ClientItineraryModal(props: {
     onClearPickup,
     onClearDestination,
     onClose,
+    onValidate,
     onUseCurrentLocation,
     onPickPickup,
     onPickDestination,
@@ -636,7 +638,7 @@ function ClientItineraryModal(props: {
         await onPickDestination(item);
         setDestSuspended(true);
         setDestToken(newSessionToken());
-        onClose();
+        // Ne pas fermer automatiquement : l’utilisateur valide explicitement.
       }
     } catch (e) {
       setDetailsError(
@@ -832,6 +834,22 @@ function ClientItineraryModal(props: {
             ))
             : null}
         </View>
+
+        <View style={styles.itinFooter}>
+          <PressableScale
+            style={[
+              styles.itinValidateBtn,
+              (!pickupQuery.trim() || !destinationQuery.trim()) &&
+                styles.itinValidateBtnDisabled,
+            ]}
+            pressedStyle={styles.itinValidateBtnPressed}
+            disabledStyle={styles.itinValidateBtnDisabled}
+            disabled={!pickupQuery.trim() || !destinationQuery.trim()}
+            onPress={onValidate}
+          >
+            <Text style={styles.itinValidateBtnText}>Valider l’itinéraire</Text>
+          </PressableScale>
+        </View>
       </SafeAreaView>
     </Modal>
   );
@@ -929,6 +947,8 @@ function ClientHomeMiddleContent(props: {
   const orderRequestInFlightRef = useRef(false);
   const cancelRequestInFlightRef = useRef(false);
   const paymentInFlightRef = useRef(false);
+  /** Annulation volontaire pour revenir en édition (doit éviter `resetAfterRide`). */
+  const cancelForEditRef = useRef(false);
   const searchHydratedForRideIdRef = useRef<string | null>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [paymentSheetLoading, setPaymentSheetLoading] = useState(false);
@@ -1031,6 +1051,36 @@ function ClientHomeMiddleContent(props: {
     return null;
   }, [pickupMode, structuredPickup, location, pickupLabel]);
 
+  /**
+   * Transition produit vers la vue `edit_itinerary`.
+   * Important: ne reset rien, ne lance pas de commande.
+   * Pré-remplit les champs d’édition à partir des valeurs choisies.
+   */
+  const enterItineraryEdit = useCallback(() => {
+    // Destination: la modal est pilotée par `searchInput`, mais le choix utilisateur
+    // est stocké dans `structuredDestination`. On hydrate l’input pour l’édition.
+    if (structuredDestination?.label?.trim()) {
+      setSearchInput(structuredDestination.label);
+      setSuggestionsSuspended(true);
+    }
+
+    // Pickup: si un pickup manuel a été choisi, on hydrate l’input.
+    if (pickupMode === 'manual' && structuredPickup?.label?.trim()) {
+      setPickupChoice('manual');
+      setPickupSearchInput(structuredPickup.label);
+      setPickupSuggestionsSuspended(true);
+    } else if (pickupMode === 'gps') {
+      // Pour garder le pickup visible, on part d’un pickup GPS “sélectionné”.
+      setPickupChoice('gps');
+    }
+
+    setItineraryOpen(true);
+  }, [pickupMode, structuredPickup?.label, structuredDestination?.label]);
+
+  const openItineraryFromSummary = useCallback(() => {
+    enterItineraryEdit();
+  }, [enterItineraryEdit]);
+
   const resetAfterRide = useCallback(
     (nextTab: 'home' | 'trips' | 'account' = 'home') => {
       // Débloque immédiatement une nouvelle commande.
@@ -1093,6 +1143,16 @@ function ClientHomeMiddleContent(props: {
     }
     terminalCleanupForRideIdRef.current = rideId;
 
+    // Cas spécial: annulation "pour éditer" → pas de reset UI, retour édition.
+    if (st === 'cancelled_by_client' && cancelForEditRef.current === true) {
+      cancelForEditRef.current = false;
+      // On quitte l'écran dédié et on conserve pickup/destination/search inputs.
+      setUiRideStatus('idle');
+      dismissRide();
+      enterItineraryEdit();
+      return;
+    }
+
     // UX fin de course : pour completed, on affiche un récap et on diffère le reset.
     if (st === 'completed') {
       setTerminalSummary({
@@ -1115,6 +1175,8 @@ function ClientHomeMiddleContent(props: {
     ride?.destination_label,
     ride?.estimated_price_eur,
     ride?.ride_completed_at,
+    dismissRide,
+    enterItineraryEdit,
     resetAfterRide,
   ]);
 
@@ -1418,10 +1480,6 @@ function ClientHomeMiddleContent(props: {
     }
     setPassengerCount(PASSENGER_COUNT_MIN_MVP);
     setHasTouchedPassengerCount(false);
-  }
-
-  function openItineraryFromSummary() {
-    setItineraryOpen(true);
   }
 
   function handlePickupSearchChange(value: string) {
@@ -1805,11 +1863,13 @@ function ClientHomeMiddleContent(props: {
           // Pattern standard ride-hailing: modifier = stop matching (cancel) puis revenir à l’édition.
           void (async () => {
             if (ride?.id && ride.status === 'requested') {
+              cancelForEditRef.current = true;
               await handleCancelPress();
-            } else {
-              setUiRideStatus('idle');
+              return;
             }
-            setItineraryOpen(true);
+            // Si ce n’est pas une ride "requested", on peut revenir en édition sans annuler.
+            setUiRideStatus('idle');
+            enterItineraryEdit();
           })();
         }}
         passengerCount={ride?.passenger_count ?? passengerCount}
@@ -2039,6 +2099,7 @@ function ClientHomeMiddleContent(props: {
           setDetailsError(null);
         }}
         onClose={() => setItineraryOpen(false)}
+        onValidate={() => setItineraryOpen(false)}
         onUseCurrentLocation={() => {
           setPickupMode('gps');
           setPickupChoice('gps');
@@ -3189,6 +3250,28 @@ const styles = StyleSheet.create({
     borderColor: '#e5e7eb',
     borderRadius: 16,
     overflow: 'hidden',
+  },
+  itinFooter: {
+    marginTop: 12,
+    paddingTop: 10,
+  },
+  itinValidateBtn: {
+    height: 54,
+    borderRadius: 999,
+    backgroundColor: BRAND_PRIMARY,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  itinValidateBtnPressed: {
+    opacity: 0.92,
+  },
+  itinValidateBtnDisabled: {
+    opacity: 0.45,
+  },
+  itinValidateBtnText: {
+    color: '#fff',
+    fontWeight: '900',
+    fontSize: 16,
   },
   itinSuggestRow: {
     paddingVertical: 12,
