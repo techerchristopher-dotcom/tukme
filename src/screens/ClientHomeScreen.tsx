@@ -18,6 +18,7 @@ import {
 } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Animated,
   Easing,
   Keyboard,
@@ -915,6 +916,12 @@ function ClientHomeMiddleContent(props: {
   const [passengerCount, setPassengerCount] = useState(
     PASSENGER_COUNT_MIN_MVP
   );
+  /**
+   * Garde-fou UX : si l’utilisateur commande avec 1 passager sans jamais
+   * toucher le sélecteur, on demande une confirmation légère.
+   */
+  const [hasTouchedPassengerCount, setHasTouchedPassengerCount] =
+    useState(false);
   const [orderError, setOrderError] = useState<string | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
@@ -1410,6 +1417,7 @@ function ClientHomeMiddleContent(props: {
       setPickupMode('manual');
     }
     setPassengerCount(PASSENGER_COUNT_MIN_MVP);
+    setHasTouchedPassengerCount(false);
   }
 
   function openItineraryFromSummary() {
@@ -1432,7 +1440,7 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
-  async function handleOrderPress() {
+  async function executeOrder() {
     if (
       !canOrder ||
       !destinationForUi ||
@@ -1513,6 +1521,34 @@ function ClientHomeMiddleContent(props: {
       orderRequestInFlightRef.current = false;
       setOrderLoading(false);
     }
+  }
+
+  function handleOrderPress() {
+    // UX guardrail: si le client n'a jamais touché et reste à 1, confirmer.
+    if (
+      passengerCount === PASSENGER_COUNT_MIN_MVP &&
+      hasTouchedPassengerCount === false
+    ) {
+      Alert.alert(
+        'Confirmation',
+        'Confirmez-vous qu’il y a bien 1 passager ?',
+        [
+          { text: 'Modifier', style: 'cancel' },
+          {
+            text: 'Oui, confirmer',
+            style: 'default',
+            onPress: () => {
+              // Considère explicitement confirmé pour éviter de re-demander.
+              setHasTouchedPassengerCount(true);
+              void executeOrder();
+            },
+          },
+        ]
+      );
+      return;
+    }
+
+    void executeOrder();
   }
 
   async function handleCancelPress() {
@@ -1765,7 +1801,20 @@ function ClientHomeMiddleContent(props: {
         map={mapElement}
         cancelling={cancelLoading}
         onCancel={() => void handleCancelPress()}
+        onEditRide={() => {
+          // Pattern standard ride-hailing: modifier = stop matching (cancel) puis revenir à l’édition.
+          void (async () => {
+            if (ride?.id && ride.status === 'requested') {
+              await handleCancelPress();
+            } else {
+              setUiRideStatus('idle');
+            }
+            setItineraryOpen(true);
+          })();
+        }}
         passengerCount={ride?.passenger_count ?? passengerCount}
+        pickupLabel={structuredPickup?.label ?? null}
+        destinationLabel={structuredDestination?.label ?? null}
       />
     );
   }
@@ -1944,7 +1993,7 @@ function ClientHomeMiddleContent(props: {
                   styles.modalBtnSecondary,
                   pressed && styles.modalBtnPressed,
                 ]}
-                onPress={() => resetAfterRide('history')}
+                onPress={() => resetAfterRide('trips')}
               >
                 <Text style={styles.modalBtnSecondaryText}>Voir mes courses</Text>
               </Pressable>
@@ -2161,7 +2210,9 @@ function ClientHomeMiddleContent(props: {
                   </View>
 
                   <View style={styles.passengerRow}>
-                    <Text style={styles.passengerRowLabel}>Passagers</Text>
+                    <Text style={styles.passengerRowLabel}>
+                      Nombre de passagers
+                    </Text>
                     <View style={styles.passengerStepper}>
                       <PressableScale
                         style={[
@@ -2172,11 +2223,12 @@ function ClientHomeMiddleContent(props: {
                         pressedStyle={styles.passengerStepBtnPressed}
                         disabledStyle={styles.passengerStepBtnDisabled}
                         disabled={passengerCount <= PASSENGER_COUNT_MIN_MVP}
-                        onPress={() =>
+                        onPress={() => {
+                          setHasTouchedPassengerCount(true);
                           setPassengerCount((c) =>
                             Math.max(PASSENGER_COUNT_MIN_MVP, c - 1)
-                          )
-                        }
+                          );
+                        }}
                         accessibilityLabel="Diminuer le nombre de passagers"
                       >
                         <Text style={styles.passengerStepBtnText}>−</Text>
@@ -2193,11 +2245,12 @@ function ClientHomeMiddleContent(props: {
                         pressedStyle={styles.passengerStepBtnPressed}
                         disabledStyle={styles.passengerStepBtnDisabled}
                         disabled={passengerCount >= PASSENGER_COUNT_MAX_MVP}
-                        onPress={() =>
+                        onPress={() => {
+                          setHasTouchedPassengerCount(true);
                           setPassengerCount((c) =>
                             Math.min(PASSENGER_COUNT_MAX_MVP, c + 1)
-                          )
-                        }
+                          );
+                        }}
                         accessibilityLabel="Augmenter le nombre de passagers"
                       >
                         <Text style={styles.passengerStepBtnText}>+</Text>
