@@ -22,6 +22,7 @@ import {
   rpcStartEnRoute,
   rpcStartRide,
 } from '../lib/driverRideProgress';
+import { formatAriary } from '../lib/taxiPricing';
 import { notifyRideEvent } from '../lib/pushNotifications';
 import { supabase, syncRealtimeAuth } from '../lib/supabase';
 import type { Profile } from '../types/profile';
@@ -36,7 +37,7 @@ type OpenRideRow = {
   id: string;
   destination_label: string;
   pickup_label: string | null;
-  estimated_price_eur: number | null;
+  estimated_price_ariary: number | null;
   passenger_count: number;
   created_at: string;
 };
@@ -44,23 +45,23 @@ type OpenRideRow = {
 type AssignedRideRow = {
   id: string;
   destination_label: string;
-  estimated_price_eur: number | null;
+  estimated_price_ariary: number | null;
   passenger_count: number;
   status: string;
   payment_expires_at: string | null;
 };
 
 const SELECT_OPEN =
-  'id, destination_label, pickup_label, estimated_price_eur, passenger_count, created_at, status';
+  'id, destination_label, pickup_label, estimated_price_ariary, passenger_count, created_at, status';
 
 const SELECT_ASSIGNED =
-  'id, destination_label, estimated_price_eur, passenger_count, status, payment_expires_at, updated_at';
+  'id, destination_label, estimated_price_ariary, passenger_count, status, payment_expires_at, updated_at';
 
-function formatEur(eur: number | null): string {
-  if (eur == null || !Number.isFinite(eur)) {
+function formatAr(ariary: number | null): string {
+  if (ariary == null || !Number.isFinite(ariary)) {
     return '—';
   }
-  return `${eur.toFixed(2)} €`;
+  return `${formatAriary(Math.round(ariary))} Ar`;
 }
 
 function driverAssignmentStatusMessage(status: string): string {
@@ -319,7 +320,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
           <Text style={styles.rideDest} numberOfLines={2}>
             {r.destination_label || 'Destination'}
           </Text>
-          <Text style={styles.ridePrice}>{formatEur(r.estimated_price_eur)}</Text>
+          <Text style={styles.ridePrice}>{formatAr(r.estimated_price_ariary)}</Text>
           <Text style={styles.ridePassengers}>
             Passagers : {r.passenger_count ?? 1}
           </Text>
@@ -601,7 +602,7 @@ function DriverRequestsBlock() {
               Départ : {r.pickup_label}
             </Text>
           ) : null}
-          <Text style={styles.ridePrice}>{formatEur(r.estimated_price_eur)}</Text>
+          <Text style={styles.ridePrice}>{formatAr(r.estimated_price_ariary)}</Text>
           <Text style={styles.ridePassengers}>
             Passagers : {r.passenger_count ?? 1}
           </Text>
