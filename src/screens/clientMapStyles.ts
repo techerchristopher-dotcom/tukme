@@ -1,6 +1,9 @@
 import { StyleSheet } from 'react-native';
 
 export const clientMapStyles = StyleSheet.create({
+  mapFullscreen: {
+    ...StyleSheet.absoluteFillObject,
+  },
   mapWrapper: {
     width: '100%',
     maxWidth: 400,
@@ -27,6 +30,9 @@ export const clientMapStyles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e2e8f0',
   },
+  mapFullscreenInner: {
+    ...StyleSheet.absoluteFillObject,
+  },
   mapPlaceholder: {
     width: '100%',
     height: 260,
@@ -44,6 +50,13 @@ export const clientMapStyles = StyleSheet.create({
     color: '#64748b',
     textAlign: 'center',
     lineHeight: 20,
+  },
+  mapPlaceholderFullscreen: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#f1f5f9',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
   },
   mapRouteRow: {
     marginTop: 10,
@@ -81,6 +94,13 @@ export const clientMapStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  mapSlotFullscreen: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
   mapHint: {
     marginTop: 12,
     fontSize: 14,
@@ -92,5 +112,21 @@ export const clientMapStyles = StyleSheet.create({
     color: '#b91c1c',
     textAlign: 'center',
     lineHeight: 20,
+  },
+  userHalo: {
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    backgroundColor: 'rgba(37, 99, 235, 0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  userDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 999,
+    backgroundColor: '#2563eb',
+    borderWidth: 2,
+    borderColor: '#fff',
   },
 });

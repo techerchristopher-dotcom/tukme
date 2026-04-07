@@ -13,9 +13,10 @@ import { supabase } from '../lib/supabase';
 
 type Props = {
   onGoToSignUp: () => void;
+  onGoBack?: () => void;
 };
 
-export function SignInScreen({ onGoToSignUp }: Props) {
+export function SignInScreen({ onGoToSignUp, onGoBack }: Props) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -39,6 +40,11 @@ export function SignInScreen({ onGoToSignUp }: Props) {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
+      {onGoBack ? (
+        <Pressable style={styles.backButton} onPress={onGoBack}>
+          <Text style={styles.backText}>← Retour</Text>
+        </Pressable>
+      ) : null}
       <Text style={styles.title}>Connexion</Text>
       <Text style={styles.hint}>Email et mot de passe</Text>
 
@@ -88,6 +94,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
     justifyContent: 'center',
     paddingHorizontal: 24,
+  },
+  backButton: {
+    position: 'absolute',
+    top: 18,
+    left: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  backText: {
+    color: '#0f766e',
+    fontSize: 15,
+    fontWeight: '600',
   },
   title: {
     fontSize: 24,

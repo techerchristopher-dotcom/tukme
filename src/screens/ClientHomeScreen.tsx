@@ -2,6 +2,8 @@ import type { Session } from '@supabase/supabase-js';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { ClientMapBlock } from './ClientMapBlock';
+import Ionicons from '@expo/vector-icons/Ionicons';
+import { LinearGradient } from 'expo-linear-gradient';
 import {
   ClientStripeRoot,
   useClientStripeSheet,
@@ -9,22 +11,27 @@ import {
 import {
   type ReactNode,
   useEffect,
+  useCallback,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  Easing,
   Keyboard,
   Modal,
   Platform,
   Pressable,
+  SafeAreaView,
+  ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
-import { SignedInShell } from '../components/SignedInShell';
 import {
   type ClientLocationState,
   useClientLocation,
@@ -58,6 +65,32 @@ import type { Profile } from '../types/profile';
 import { ClientRideHistoryScreen } from './ClientRideHistoryScreen';
 
 const RIDE_RT_LOG = '[ride-realtime]';
+
+/** Couleur primaire Tukme (alignée sur les CTA existants). */
+const BRAND_PRIMARY = '#0f766e';
+const ICON_INACTIVE = '#64748b';
+const NAV_ICON_SIZE = 22;
+
+function usePressScale(toScale = 0.98) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const onPressIn = useCallback(() => {
+    Animated.spring(scale, {
+      toValue: toScale,
+      speed: 28,
+      bounciness: 0,
+      useNativeDriver: true,
+    }).start();
+  }, [scale, toScale]);
+  const onPressOut = useCallback(() => {
+    Animated.spring(scale, {
+      toValue: 1,
+      speed: 28,
+      bounciness: 0,
+      useNativeDriver: true,
+    }).start();
+  }, [scale]);
+  return { scale, onPressIn, onPressOut };
+}
 
 type Props = {
   session: Session;
@@ -294,36 +327,46 @@ function PlacesDestinationSection(props: {
   const showSuggestions =
     !suggestionsSuspended && suggestions.length > 0 && !pickingPlace;
 
+  const [destInputFocused, setDestInputFocused] = useState(false);
+
   return (
     <View style={styles.destinationBlock}>
       <Text style={styles.destinationTitle}>Où allez-vous ?</Text>
-      <Text style={styles.destinationHint}>
-        Recherche Google Places, priorisée autour de votre position. Choisissez
-        une suggestion pour fixer la destination sur la carte.
-      </Text>
+      <Text style={styles.destinationHint}>Choisissez une destination.</Text>
 
       {configError ? (
         <Text style={styles.geocodeError}>{configError}</Text>
       ) : null}
 
       {location.phase !== 'ready' ? (
-        <Text style={styles.positionWait}>
-          Localisation en cours… Les suggestions seront moins précises jusqu’à
-          ce que votre position soit connue.
-        </Text>
+        <Text style={styles.positionWait}>Localisation en cours…</Text>
       ) : null}
 
-      <TextInput
-        style={styles.destinationInput}
-        value={searchInput}
-        onChangeText={onSearchChange}
-        placeholder="Adresse, lieu, arrêt…"
-        placeholderTextColor="#94a3b8"
-        returnKeyType="search"
-        autoCorrect={false}
-        autoCapitalize="none"
-        editable={!pickingPlace && !configError}
-      />
+      <View
+        style={[
+          styles.destinationInputRow,
+          destInputFocused && styles.destinationInputRowFocused,
+        ]}
+      >
+        <Ionicons
+          name={destInputFocused ? 'search' : 'search-outline'}
+          size={NAV_ICON_SIZE}
+          color={destInputFocused ? BRAND_PRIMARY : ICON_INACTIVE}
+        />
+        <TextInput
+          style={styles.destinationInputField}
+          value={searchInput}
+          onChangeText={onSearchChange}
+          placeholder="Adresse, lieu, arrêt…"
+          placeholderTextColor="#94a3b8"
+          returnKeyType="search"
+          autoCorrect={false}
+          autoCapitalize="none"
+          editable={!pickingPlace && !configError}
+          onFocus={() => setDestInputFocused(true)}
+          onBlur={() => setDestInputFocused(false)}
+        />
+      </View>
 
       {loading ? (
         <View style={styles.suggestLoading}>
@@ -412,10 +455,7 @@ function PlacesPickupSection(props: {
   return (
     <View style={styles.destinationBlock}>
       <Text style={styles.destinationTitle}>Point de départ</Text>
-      <Text style={styles.destinationHint}>
-        Par défaut, Tukme utilise votre position actuelle. Vous pouvez choisir un
-        autre point de récupération via Google Places.
-      </Text>
+      <Text style={styles.destinationHint}>Choisissez un point de départ.</Text>
 
       <Pressable
         style={({ pressed }) => [
@@ -430,7 +470,7 @@ function PlacesPickupSection(props: {
       {configError ? <Text style={styles.geocodeError}>{configError}</Text> : null}
 
       <TextInput
-        style={styles.destinationInput}
+        style={styles.pickupSearchInput}
         value={searchInput}
         onChangeText={onSearchChange}
         placeholder="Chercher un point de départ…"
@@ -482,12 +522,304 @@ function PlacesPickupSection(props: {
   );
 }
 
+function ClientItineraryModal(props: {
+  visible: boolean;
+  location: ClientLocationState;
+  pickupQuery: string;
+  onPickupQueryChange: (v: string) => void;
+  pickupIsGps: boolean;
+  destinationQuery: string;
+  onDestinationQueryChange: (v: string) => void;
+  onClose: () => void;
+  onUseCurrentLocation: () => void;
+  onPickPickup: (item: PlaceSuggestionItem) => Promise<void>;
+  onPickDestination: (item: PlaceSuggestionItem) => Promise<void>;
+}) {
+  const {
+    visible,
+    location,
+    pickupQuery,
+    onPickupQueryChange,
+    pickupIsGps,
+    destinationQuery,
+    onDestinationQueryChange,
+    onClose,
+    onUseCurrentLocation,
+    onPickPickup,
+    onPickDestination,
+  } = props;
+
+  const pickupRef = useRef<TextInput>(null);
+  const destRef = useRef<TextInput>(null);
+  // UX: étape 1 = pickup, étape 2 = destination.
+  const [active, setActive] = useState<'pickup' | 'destination'>('pickup');
+  const [pickupToken, setPickupToken] = useState(newSessionToken);
+  const [destToken, setDestToken] = useState(newSessionToken);
+  const [pickupSuspended, setPickupSuspended] = useState(false);
+  const [destSuspended, setDestSuspended] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+
+  const pickupRowScale = useRef(new Animated.Value(1)).current;
+  const destRowScale = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (!visible) return;
+    setActive('pickup');
+    const t = setTimeout(() => pickupRef.current?.focus(), 200);
+    return () => clearTimeout(t);
+  }, [visible]);
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.spring(pickupRowScale, {
+        toValue: active === 'pickup' ? 1.015 : 1,
+        speed: 22,
+        bounciness: 5,
+        useNativeDriver: true,
+      }),
+      Animated.spring(destRowScale, {
+        toValue: active === 'destination' ? 1.015 : 1,
+        speed: 22,
+        bounciness: 5,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [active, pickupRowScale, destRowScale]);
+
+  const configError = useMemo(() => {
+    if (isPlacesConfigured()) return null;
+    return 'Ajoutez EXPO_PUBLIC_GOOGLE_PLACES_API_KEY dans votre fichier .env, puis redémarrez Expo.';
+  }, []);
+
+  const biasLat = location.phase === 'ready' ? location.latitude : null;
+  const biasLng = location.phase === 'ready' ? location.longitude : null;
+
+  const pickupSuggest = usePlacesSuggestions({
+    query: pickupQuery,
+    sessionToken: pickupToken,
+    biasLat,
+    biasLng,
+    suspended: pickupSuspended || active !== 'pickup',
+  });
+  const destSuggest = usePlacesSuggestions({
+    query: destinationQuery,
+    sessionToken: destToken,
+    biasLat,
+    biasLng,
+    suspended: destSuspended || active !== 'destination',
+  });
+
+  const current = active === 'pickup' ? pickupSuggest : destSuggest;
+  const showSuggestions =
+    !picking && current.suggestions.length > 0 && !(active === 'pickup' ? pickupSuspended : destSuspended);
+
+  async function handlePick(item: PlaceSuggestionItem) {
+    Keyboard.dismiss();
+    if (configError) return;
+    setPicking(true);
+    setDetailsError(null);
+    try {
+      if (active === 'pickup') {
+        await onPickPickup(item);
+        setPickupSuspended(true);
+        setPickupToken(newSessionToken());
+        // Move focus to destination after choosing pickup (Uber-like flow).
+        setActive('destination');
+        setTimeout(() => destRef.current?.focus(), 120);
+      } else {
+        await onPickDestination(item);
+        setDestSuspended(true);
+        setDestToken(newSessionToken());
+        onClose();
+      }
+    } catch (e) {
+      setDetailsError(
+        e instanceof Error ? e.message : 'Impossible de récupérer ce lieu.'
+      );
+    } finally {
+      setPicking(false);
+    }
+  }
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={onClose}
+    >
+      <SafeAreaView style={styles.itinRoot}>
+        <View style={styles.itinHeader}>
+          <Pressable
+            style={({ pressed }) => [styles.itinClose, pressed && styles.itinPressed]}
+            onPress={onClose}
+          >
+            <Ionicons name="close" size={22} color="#0f172a" />
+          </Pressable>
+          <Text style={styles.itinTitle}>Itinéraire</Text>
+          <View style={styles.itinHeaderRight} />
+        </View>
+
+        <View style={styles.itinInputsCard}>
+          <View style={styles.itinLeftRail}>
+            <View style={[styles.itinDot, styles.itinDotFilled]} />
+            <View style={styles.itinRailLine} />
+            <View style={[styles.itinDot, styles.itinDotHollow]} />
+          </View>
+
+          <View style={styles.itinFields}>
+            <Animated.View
+              style={[
+                styles.itinRowSlot,
+                active === 'pickup' && styles.itinRowSlotActive,
+                { transform: [{ scale: pickupRowScale }] },
+              ]}
+            >
+              <View style={styles.itinRow}>
+                <Text
+                  style={[
+                    styles.itinRowLabel,
+                    active === 'pickup' && styles.itinRowLabelActive,
+                  ]}
+                >
+                  Prise en charge
+                </Text>
+                <TextInput
+                  ref={pickupRef}
+                  style={styles.itinPickupInput}
+                  value={pickupQuery}
+                  onChangeText={(v) => {
+                    onPickupQueryChange(v);
+                    setPickupSuspended(false);
+                    setDetailsError(null);
+                  }}
+                  placeholder="Lieu de prise en charge"
+                  placeholderTextColor="#9ca3af"
+                  returnKeyType="next"
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                  editable={!picking && !configError}
+                  onFocus={() => setActive('pickup')}
+                onSubmitEditing={() => {
+                  if (pickupQuery.trim()) {
+                    setActive('destination');
+                    destRef.current?.focus();
+                  } else {
+                    pickupRef.current?.focus();
+                  }
+                }}
+                />
+              </View>
+            </Animated.View>
+
+            <View style={styles.itinDivider} />
+
+            <Animated.View
+              style={[
+                styles.itinRowSlot,
+                active === 'destination' && styles.itinRowSlotActive,
+                { transform: [{ scale: destRowScale }] },
+              ]}
+            >
+              <View style={styles.itinRow}>
+                <Text
+                  style={[
+                    styles.itinRowLabel,
+                    active === 'destination' && styles.itinRowLabelActive,
+                  ]}
+                >
+                  Destination
+                </Text>
+                <TextInput
+                  ref={destRef}
+                  style={styles.itinDestinationInput}
+                  value={destinationQuery}
+                  onChangeText={(v) => {
+                    onDestinationQueryChange(v);
+                    setDestSuspended(false);
+                    setDetailsError(null);
+                  }}
+                  placeholder="Lieu d’arrivée"
+                  placeholderTextColor="#9ca3af"
+                  returnKeyType="search"
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                  editable={!picking && !configError}
+                  onFocus={() => setActive('destination')}
+                />
+              </View>
+            </Animated.View>
+          </View>
+        </View>
+
+        {configError ? <Text style={styles.itinError}>{configError}</Text> : null}
+        {current.error ? <Text style={styles.itinError}>{current.error}</Text> : null}
+        {detailsError ? <Text style={styles.itinError}>{detailsError}</Text> : null}
+
+        {current.loading ? (
+          <View style={styles.itinLoadingRow}>
+            <ActivityIndicator size="small" color={BRAND_PRIMARY} />
+            <Text style={styles.itinLoadingText}>Recherche…</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.itinSuggestions}>
+          <Pressable
+            style={({ pressed }) => [
+              styles.itinSuggestRow,
+              pressed && styles.itinSuggestRowPressed,
+            ]}
+            onPress={() => {
+              onUseCurrentLocation();
+              setPickupSuspended(true);
+              setActive('destination');
+              setTimeout(() => destRef.current?.focus(), 120);
+            }}
+          >
+            <Text style={styles.itinSuggestPrimary}>
+              📍 Emplacement actuel
+            </Text>
+            <Text style={styles.itinSuggestSecondary} numberOfLines={1}>
+              {pickupIsGps ? 'Utilisé actuellement' : 'Utiliser la position GPS'}
+            </Text>
+          </Pressable>
+
+          {showSuggestions
+            ? current.suggestions.map((s) => (
+              <Pressable
+                key={s.placeId}
+                style={({ pressed }) => [
+                  styles.itinSuggestRow,
+                  pressed && styles.itinSuggestRowPressed,
+                ]}
+                onPress={() => void handlePick(s)}
+              >
+                <Text style={styles.itinSuggestPrimary}>{s.primaryText}</Text>
+                {s.secondaryText ? (
+                  <Text style={styles.itinSuggestSecondary}>{s.secondaryText}</Text>
+                ) : null}
+              </Pressable>
+            ))
+            : null}
+        </View>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 function ClientHomeMiddleContent(props: {
   userId: string;
   stripePublishableConfigured: boolean;
+  profile: Profile;
+  onDevResetRole: () => Promise<void>;
 }) {
-  const { userId, stripePublishableConfigured } = props;
-  const [view, setView] = useState<'home' | 'history'>('home');
+  const { userId, stripePublishableConfigured, profile, onDevResetRole } = props;
+  const [tab, setTab] = useState<'home' | 'trips' | 'account'>('home');
+  const [itineraryOpen, setItineraryOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [resettingRole, setResettingRole] = useState(false);
   const { initPaymentSheet, presentPaymentSheet } = useClientStripeSheet();
   const {
     ride,
@@ -501,15 +833,23 @@ function ClientHomeMiddleContent(props: {
   } = useActiveRide(userId);
 
   useEffect(() => {
-    if (ride && view === 'history') {
-      setView('home');
+    if (ride && tab !== 'home') {
+      setTab('home');
     }
-  }, [ride, view]);
+  }, [ride, tab]);
   const location = useClientLocation();
   const [searchInput, setSearchInput] = useState('');
   const [structuredDestination, setStructuredDestination] =
     useState<ClientDestination | null>(null);
   const [pickupMode, setPickupMode] = useState<'gps' | 'manual'>('gps');
+  /**
+   * UX Itinéraire: le champ pickup reste vide tant que l’utilisateur n’a pas
+   * choisi explicitement un pickup (GPS ou manuel). Les coords GPS restent la
+   * valeur par défaut pour commander, mais l’input n’est pas auto-rempli.
+   */
+  const [pickupChoice, setPickupChoice] = useState<'unset' | 'gps' | 'manual'>(
+    'unset'
+  );
   const [pickupSearchInput, setPickupSearchInput] = useState('');
   const [structuredPickup, setStructuredPickup] =
     useState<ClientDestination | null>(null);
@@ -551,6 +891,23 @@ function ClientHomeMiddleContent(props: {
     ride_completed_at: string | null;
   } | null>(null);
   const [showCompletionModal, setShowCompletionModal] = useState(false);
+
+  const sheetAnim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(sheetAnim, {
+      toValue: 1,
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [sheetAnim]);
+
+  const orderCta = usePressScale(0.98);
+  const payCta = usePressScale(0.98);
+
+  const hasTripSelected =
+    !!pickupForUi?.label?.trim() && !!destinationForUi?.label?.trim();
+  const showBoltTripSummary = !ride && structuredDestination != null && hasTripSelected;
 
   const destinationForUi = useMemo((): ClientDestination | null => {
     if (structuredDestination) {
@@ -601,7 +958,7 @@ function ClientHomeMiddleContent(props: {
   }, [pickupMode, structuredPickup, location, pickupLabel]);
 
   const resetAfterRide = useCallback(
-    (nextView: 'home' | 'history' = 'home') => {
+    (nextTab: 'home' | 'trips' | 'account' = 'home') => {
       // Débloque immédiatement une nouvelle commande.
       orderRequestInFlightRef.current = false;
       cancelRequestInFlightRef.current = false;
@@ -625,6 +982,7 @@ function ClientHomeMiddleContent(props: {
       setDetailsError(null);
       setStructuredPickup(null);
       setPickupSearchInput('');
+      setPickupChoice('unset');
       setPickupSuggestionsSuspended(false);
       setPickupDetailsError(null);
       if (location.phase === 'ready') {
@@ -635,7 +993,7 @@ function ClientHomeMiddleContent(props: {
 
       setTerminalSummary(null);
       setShowCompletionModal(false);
-      setView(nextView);
+      setTab(nextTab);
 
       dismissRide();
     },
@@ -943,8 +1301,28 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
+  function resetTripSelection() {
+    setStructuredDestination(null);
+    setSearchInput('');
+    setSuggestionsSuspended(false);
+    setDetailsError(null);
+    setOrderError(null);
+    // Pickup: on garde la géoloc dispo, mais on revient à l’intention “non choisi”.
+    setStructuredPickup(null);
+    setPickupSearchInput('');
+    setPickupChoice('unset');
+    setPickupSuggestionsSuspended(false);
+    setPickupDetailsError(null);
+    if (location.phase === 'ready') {
+      setPickupMode('gps');
+    } else {
+      setPickupMode('manual');
+    }
+  }
+
   function handlePickupSearchChange(value: string) {
     setPickupSearchInput(value);
+    setPickupChoice('manual');
     setPickupSuggestionsSuspended(false);
     setPickupDetailsError(null);
     setOrderError(null);
@@ -1005,7 +1383,8 @@ function ClientHomeMiddleContent(props: {
         status: 'requested',
         pickup_lat: pickupLat,
         pickup_lng: pickupLng,
-        pickup_label: pickupLabel,
+        // IMPORTANT UX: garder le libellé exact choisi par le client si possible.
+        pickup_label: pickupForUi?.label ?? pickupLabel,
         destination_lat: destinationForUi.latitude,
         destination_lng: destinationForUi.longitude,
         destination_label: destinationForUi.label,
@@ -1161,13 +1540,16 @@ function ClientHomeMiddleContent(props: {
       setOrderError(null);
       setCancelError(null);
       orderRequestInFlightRef.current = false;
+      // UX: conserver le libellé choisi par l’utilisateur (suggestion), pas une
+      // adresse normalisée/générique renvoyée par Place Details.
+      const displayLabel = item.fullDescription?.trim() || details.label;
       setStructuredDestination({
-        label: details.label,
+        label: displayLabel,
         latitude: details.latitude,
         longitude: details.longitude,
         placeId: details.placeId,
       });
-      setSearchInput(details.label);
+      setSearchInput(displayLabel);
       setSuggestionsSuspended(true);
       setSessionToken(newSessionToken());
     } catch (e) {
@@ -1190,6 +1572,7 @@ function ClientHomeMiddleContent(props: {
       return;
     }
     setPickupMode('manual');
+    setPickupChoice('manual');
     setPickupPickingPlace(true);
     setPickupDetailsError(null);
     try {
@@ -1201,13 +1584,15 @@ function ClientHomeMiddleContent(props: {
       setOrderError(null);
       setCancelError(null);
       orderRequestInFlightRef.current = false;
+      // UX: idem pickup — conserver le libellé choisi par le client.
+      const displayLabel = item.fullDescription?.trim() || details.label;
       setStructuredPickup({
-        label: details.label,
+        label: displayLabel,
         latitude: details.latitude,
         longitude: details.longitude,
         placeId: details.placeId,
       });
-      setPickupSearchInput(details.label);
+      setPickupSearchInput(displayLabel);
       setPickupSuggestionsSuspended(true);
       setPickupSessionToken(newSessionToken());
     } catch (e) {
@@ -1222,17 +1607,165 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
-  if (view === 'history') {
-    return (
-      <ClientRideHistoryScreen
-        userId={userId}
-        onBack={() => setView('home')}
-      />
-    );
+  async function handleSignOut() {
+    setSigningOut(true);
+    try {
+      await supabase.auth.signOut();
+    } finally {
+      setSigningOut(false);
+    }
+  }
+
+  async function handleDevResetRole() {
+    setResettingRole(true);
+    try {
+      await onDevResetRole();
+      setMenuOpen(false);
+    } finally {
+      setResettingRole(false);
+    }
   }
 
   return (
-    <>
+    <View style={styles.boltRoot}>
+      <ClientMapBlock
+        location={location}
+        variant="fullscreen"
+        pickup={
+          pickupForUi
+            ? {
+                latitude: pickupForUi.latitude,
+                longitude: pickupForUi.longitude,
+                label: pickupForUi.label,
+              }
+            : null
+        }
+        destination={destinationForUi}
+        routeMetrics={routeMetrics}
+        driverLat={ride?.driver_lat ?? null}
+        driverLng={ride?.driver_lng ?? null}
+      />
+
+      <LinearGradient
+        pointerEvents="none"
+        colors={[
+          'rgba(255,255,255,0)',
+          'rgba(255,255,255,0.65)',
+          'rgba(255,255,255,1)',
+        ]}
+        locations={[0, 0.55, 1]}
+        style={styles.mapScrim}
+      />
+
+      <SafeAreaView pointerEvents="box-none" style={styles.safeTop}>
+        <Pressable
+          style={({ pressed }) => [
+            styles.floatingMenuButton,
+            pressed && styles.floatingMenuButtonPressed,
+          ]}
+          onPress={() => setMenuOpen(true)}
+        >
+          <Text style={styles.floatingMenuIcon}>≡</Text>
+        </Pressable>
+      </SafeAreaView>
+
+      {showBoltTripSummary ? (
+        <SafeAreaView pointerEvents="box-none" style={styles.tripSummarySafeTop}>
+          <View style={styles.tripSummaryBar}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.tripSummaryIconBtn,
+                pressed && styles.tripSummaryIconBtnPressed,
+              ]}
+              onPress={resetTripSelection}
+            >
+              <Ionicons name="close" size={18} color="#0f172a" />
+            </Pressable>
+
+            <View style={styles.tripSummaryTextWrap}>
+              <Text style={styles.tripSummaryText} numberOfLines={1}>
+                {pickupForUi?.label?.trim() || 'Départ'} →{' '}
+                {destinationForUi?.label?.trim() || 'Destination'}
+              </Text>
+            </View>
+
+            <Pressable
+              style={({ pressed }) => [
+                styles.tripSummaryIconBtn,
+                pressed && styles.tripSummaryIconBtnPressed,
+              ]}
+              onPress={() => undefined}
+            >
+              <Ionicons name="add" size={18} color="#0f172a" />
+            </Pressable>
+          </View>
+        </SafeAreaView>
+      ) : null}
+
+      <Modal
+        visible={menuOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMenuOpen(false)}
+      >
+        <Pressable
+          style={styles.menuBackdrop}
+          onPress={() => setMenuOpen(false)}
+        >
+          <Pressable style={styles.menuCard} onPress={() => undefined}>
+            <Text style={styles.menuTitle}>Menu</Text>
+            <Pressable
+              style={({ pressed }) => [
+                styles.menuItem,
+                pressed && styles.menuItemPressed,
+              ]}
+              onPress={() => {
+                setMenuOpen(false);
+                setTab('account');
+              }}
+            >
+              <Text style={styles.menuItemText}>Compte</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.menuItem,
+                pressed && styles.menuItemPressed,
+              ]}
+              onPress={() => {
+                setMenuOpen(false);
+                setTab('trips');
+              }}
+            >
+              <Text style={styles.menuItemText}>Trajets</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.menuItem,
+                pressed && styles.menuItemPressed,
+              ]}
+              disabled={signingOut}
+              onPress={() => void handleSignOut()}
+            >
+              <Text style={styles.menuItemText}>
+                {signingOut ? 'Déconnexion…' : 'Se déconnecter'}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.menuItem,
+                pressed && styles.menuItemPressed,
+              ]}
+              disabled={resettingRole}
+              onPress={() => void handleDevResetRole()}
+            >
+              <Text style={styles.menuItemMuted}>
+                {resettingRole ? 'Reset rôle…' : 'Réinitialiser le rôle (dev)'}
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <Modal
         visible={showCompletionModal}
         transparent
@@ -1302,43 +1835,229 @@ function ClientHomeMiddleContent(props: {
         </Pressable>
       </Modal>
 
-      <TripSummaryCard
+      <ClientItineraryModal
+        visible={itineraryOpen}
         location={location}
-        pickupMode={pickupMode}
-        pickup={pickupForUi}
-        destination={destinationForUi}
-      />
-      <Pressable
-        style={({ pressed }) => [
-          styles.historyButton,
-          pressed && styles.historyButtonPressed,
-        ]}
-        onPress={() => setView('history')}
-      >
-        <Text style={styles.historyButtonText}>Mes courses</Text>
-      </Pressable>
-      <ClientMapBlock
-        location={location}
-        pickup={
-          pickupForUi
-            ? {
-                latitude: pickupForUi.latitude,
-                longitude: pickupForUi.longitude,
-                label: pickupForUi.label,
-              }
-            : null
+        pickupQuery={
+          pickupChoice === 'manual'
+            ? pickupSearchInput
+            : pickupChoice === 'gps'
+              ? pickupForUi?.label?.trim() || ''
+              : ''
         }
-        destination={destinationForUi}
-        routeMetrics={routeMetrics}
-        driverLat={ride?.driver_lat ?? null}
-        driverLng={ride?.driver_lng ?? null}
+        onPickupQueryChange={handlePickupSearchChange}
+        pickupIsGps={pickupChoice === 'gps'}
+        destinationQuery={searchInput}
+        onDestinationQueryChange={handleSearchChange}
+        onClose={() => setItineraryOpen(false)}
+        onUseCurrentLocation={() => {
+          setPickupMode('gps');
+          setPickupChoice('gps');
+          setStructuredPickup(null);
+          setPickupSearchInput('');
+          setPickupSuggestionsSuspended(false);
+          setPickupDetailsError(null);
+        }}
+        onPickPickup={async (item) => {
+          await handlePickPickupSuggestion(item);
+        }}
+        onPickDestination={async (item) => {
+          await handlePickSuggestion(item);
+        }}
       />
-      <ZonePricingCard
-        estimate={ridePricing}
-        hasDestination={destinationForUi !== null}
-      />
-      {structuredDestination || ride != null ? (
-        <View style={styles.orderBlock}>
+
+      <View style={styles.bottomSheet}>
+        <View style={styles.sheetGrabber} />
+
+        {tab === 'trips' ? (
+          <View style={styles.sheetBody}>
+            <ClientRideHistoryScreen userId={userId} onBack={() => setTab('home')} />
+          </View>
+        ) : tab === 'account' ? (
+          <View style={styles.sheetBody}>
+            <Text style={styles.sheetTitle}>Compte</Text>
+            <View style={styles.accountCard}>
+              <Text style={styles.accountLabel}>Nom</Text>
+              <Text style={styles.accountValue}>
+                {profile.full_name?.trim() ? profile.full_name : '—'}
+              </Text>
+              <Text style={[styles.accountLabel, styles.accountLabelSpaced]}>
+                Téléphone
+              </Text>
+              <Text style={styles.accountValue}>
+                {profile.phone?.trim() ? profile.phone : '—'}
+              </Text>
+              <Text style={[styles.accountLabel, styles.accountLabelSpaced]}>
+                Rôle
+              </Text>
+              <Text style={styles.accountValue}>{profile.role}</Text>
+            </View>
+            <Text style={styles.sheetHint}>
+              MVP : cet onglet affichera plus d’options bientôt.
+            </Text>
+          </View>
+        ) : (
+          <Animated.ScrollView
+            style={[
+              styles.sheetBody,
+              {
+                opacity: sheetAnim,
+                transform: [
+                  {
+                    translateY: sheetAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [18, 0],
+                    }),
+                  },
+                ],
+              },
+            ]}
+            contentContainerStyle={styles.sheetContent}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
+          >
+            {!ride && !structuredDestination ? (
+              <>
+                <View style={styles.itinTeaserHeader}>
+                  <Text style={styles.sheetTitle}>Où allez-vous ?</Text>
+                  <Text style={styles.sheetHint}>
+                    Départ : {pickupForUi?.label?.trim() || 'Position actuelle'}
+                  </Text>
+                </View>
+
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.itinTeaserCard,
+                    pressed && styles.itinTeaserCardPressed,
+                  ]}
+                  onPress={() => setItineraryOpen(true)}
+                >
+                  <View style={styles.itinTeaserLeftRail}>
+                    <View style={[styles.itinDot, styles.itinDotFilled]} />
+                    <View style={styles.itinRailLine} />
+                    <View style={[styles.itinDot, styles.itinDotHollow]} />
+                  </View>
+                  <View style={styles.itinTeaserTexts}>
+                    <Text style={styles.itinTeaserPickup} numberOfLines={1}>
+                      {pickupForUi?.label?.trim() || 'Lieu de prise en charge'}
+                    </Text>
+                    <Text style={styles.itinTeaserDestination} numberOfLines={1}>
+                      Lieu d’arrivée
+                    </Text>
+                  </View>
+                  <Ionicons
+                    name="chevron-forward"
+                    size={20}
+                    color="#94a3b8"
+                  />
+                </Pressable>
+              </>
+            ) : showBoltTripSummary ? (
+              <>
+                <Text style={styles.sheetTitle}>Votre trajet</Text>
+                <Text style={styles.sheetHint} numberOfLines={2}>
+                  {pickupForUi?.label?.trim() || 'Départ'} →{' '}
+                  {destinationForUi?.label?.trim() || 'Destination'}
+                </Text>
+
+                <View style={styles.boltPriceCard}>
+                  <Text style={styles.boltPriceLabel}>Estimation</Text>
+                  <Text style={styles.boltPriceValue}>
+                    {ridePricing?.estimatedPriceEuro != null &&
+                    Number.isFinite(ridePricing.estimatedPriceEuro)
+                      ? `${ridePricing.estimatedPriceEuro.toFixed(2)} €`
+                      : '—'}
+                  </Text>
+                  {ridePricing?.estimatedPriceAriary != null &&
+                  Number.isFinite(ridePricing.estimatedPriceAriary) ? (
+                    <Text style={styles.boltPriceSub}>
+                      {formatAriary(ridePricing.estimatedPriceAriary)} Ar
+                    </Text>
+                  ) : null}
+
+                  {ridePricing?.pickupZone || ridePricing?.destinationZone ? (
+                    <Text style={styles.boltZones}>
+                      {ridePricing.pickupZone ? `Zone départ : ${ridePricing.pickupZone}` : 'Zone départ : —'}
+                      {'\n'}
+                      {ridePricing.destinationZone
+                        ? `Zone destination : ${ridePricing.destinationZone}`
+                        : 'Zone destination : —'}
+                    </Text>
+                  ) : null}
+
+                  {routeMetrics.distanceKm != null &&
+                  routeMetrics.durationMinutes != null ? (
+                    <Text style={styles.boltZones}>
+                      Env. {routeMetrics.distanceKm.toLocaleString('fr-FR')} km ·{' '}
+                      {routeMetrics.durationMinutes} min
+                    </Text>
+                  ) : null}
+                </View>
+              </>
+            ) : (
+              <>
+                <Text style={styles.sheetTitle}>Où allez-vous ?</Text>
+                <Text style={styles.sheetHint}>
+                  Départ : {pickupForUi?.label?.trim() || 'Position actuelle'}
+                </Text>
+
+                <PlacesDestinationSection
+                  location={location}
+                  searchInput={searchInput}
+                  onSearchChange={handleSearchChange}
+                  suggestionsSuspended={suggestionsSuspended}
+                  sessionToken={sessionToken}
+                  onPickSuggestion={(item) => void handlePickSuggestion(item)}
+                  pickingPlace={pickingPlace}
+                  configError={configError}
+                  detailsError={detailsError}
+                />
+
+                {pickupMode === 'manual' ? (
+                  <PlacesPickupSection
+                    location={location}
+                    searchInput={pickupSearchInput}
+                    onSearchChange={handlePickupSearchChange}
+                    suggestionsSuspended={pickupSuggestionsSuspended}
+                    sessionToken={pickupSessionToken}
+                    onPickSuggestion={(item) =>
+                      void handlePickPickupSuggestion(item)
+                    }
+                    pickingPlace={pickupPickingPlace}
+                    configError={configError}
+                    detailsError={pickupDetailsError}
+                    onUseGpsPress={() => {
+                      setPickupMode('gps');
+                      setStructuredPickup(null);
+                      setPickupSearchInput('');
+                      setPickupSuggestionsSuspended(false);
+                      setPickupDetailsError(null);
+                    }}
+                  />
+                ) : (
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.pickupManualButton,
+                      pressed && styles.pickupManualButtonPressed,
+                    ]}
+                    onPress={() => setPickupMode('manual')}
+                  >
+                    <Text style={styles.pickupManualButtonText}>
+                      Choisir un autre point de départ
+                    </Text>
+                  </Pressable>
+                )}
+
+                <ZonePricingCard
+                  estimate={ridePricing}
+                  hasDestination={destinationForUi !== null}
+                />
+              </>
+            )}
+
+            {structuredDestination || ride != null ? (
+              <View style={styles.orderBlock}>
           {rideFetchLoading && !ride ? (
             <View style={styles.rideFetchLoadingRow}>
               <ActivityIndicator size="small" color="#0f766e" />
@@ -1351,26 +2070,34 @@ function ClientHomeMiddleContent(props: {
             <Text style={styles.orderError}>{rideFetchError}</Text>
           ) : null}
           {structuredDestination ? (
-            <Pressable
-              style={({ pressed }) => [
-                styles.orderButton,
-                (!canOrder || orderLoading || hasOpenRide) &&
-                  styles.orderButtonDisabled,
-                pressed &&
-                  canOrder &&
-                  !orderLoading &&
-                  !hasOpenRide &&
-                  styles.orderButtonPressed,
-              ]}
-              disabled={!canOrder || orderLoading || hasOpenRide}
-              onPress={() => void handleOrderPress()}
+            <Animated.View
+              style={{
+                transform: [{ scale: orderCta.scale }],
+              }}
             >
-              {orderLoading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.orderButtonLabel}>Commander</Text>
-              )}
-            </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.orderButton,
+                  (!canOrder || orderLoading || hasOpenRide) &&
+                    styles.orderButtonDisabled,
+                  pressed &&
+                    canOrder &&
+                    !orderLoading &&
+                    !hasOpenRide &&
+                    styles.orderButtonPressed,
+                ]}
+                disabled={!canOrder || orderLoading || hasOpenRide}
+                onPressIn={orderCta.onPressIn}
+                onPressOut={orderCta.onPressOut}
+                onPress={() => void handleOrderPress()}
+              >
+                {orderLoading ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.orderButtonLabel}>Commander</Text>
+                )}
+              </Pressable>
+            </Animated.View>
           ) : null}
           {!destinationForUi && ride != null ? (
             <Text style={styles.orderHint}>
@@ -1454,29 +2181,33 @@ function ClientHomeMiddleContent(props: {
                 (iOS/Android), pas dans le navigateur.
               </Text>
             ) : (
-              <Pressable
-                style={({ pressed }) => [
-                  styles.orderPayButton,
-                  paymentSheetLoading && styles.orderButtonDisabled,
-                  pressed &&
-                    !paymentSheetLoading &&
-                    styles.orderPayButtonPressed,
-                ]}
-                disabled={paymentSheetLoading}
-                onPress={() => void handlePayPress()}
-              >
-                {paymentSheetLoading ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.orderPayButtonLabel}>
-                    Payer
-                    {ride.estimated_price_eur != null &&
-                    Number.isFinite(ride.estimated_price_eur)
-                      ? ` (${ride.estimated_price_eur.toFixed(2)} €)`
-                      : ''}
-                  </Text>
-                )}
-              </Pressable>
+              <Animated.View style={{ transform: [{ scale: payCta.scale }] }}>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.orderPayButton,
+                    paymentSheetLoading && styles.orderButtonDisabled,
+                    pressed &&
+                      !paymentSheetLoading &&
+                      styles.orderPayButtonPressed,
+                  ]}
+                  disabled={paymentSheetLoading}
+                  onPressIn={payCta.onPressIn}
+                  onPressOut={payCta.onPressOut}
+                  onPress={() => void handlePayPress()}
+                >
+                  {paymentSheetLoading ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.orderPayButtonLabel}>
+                      Payer
+                      {ride.estimated_price_eur != null &&
+                      Number.isFinite(ride.estimated_price_eur)
+                        ? ` (${ride.estimated_price_eur.toFixed(2)} €)`
+                        : ''}
+                    </Text>
+                  )}
+                </Pressable>
+              </Animated.View>
             )
           ) : null}
           {paymentError ? (
@@ -1506,52 +2237,72 @@ function ClientHomeMiddleContent(props: {
           {orderError ? (
             <Text style={styles.orderError}>{orderError}</Text>
           ) : null}
+              </View>
+            ) : null}
+          </Animated.ScrollView>
+        )}
+      </View>
+
+      <SafeAreaView style={styles.bottomNavSafe} pointerEvents="box-none">
+        <View style={styles.bottomNav}>
+          <Pressable
+            style={({ pressed }) => [
+              styles.navItem,
+              pressed && styles.navItemPressed,
+              tab === 'home' && styles.navItemActive,
+            ]}
+            onPress={() => setTab('home')}
+          >
+            <Ionicons
+              name={tab === 'home' ? 'home' : 'home-outline'}
+              size={NAV_ICON_SIZE}
+              color={tab === 'home' ? BRAND_PRIMARY : ICON_INACTIVE}
+            />
+            <Text style={tab === 'home' ? styles.navTextActive : styles.navText}>
+              Accueil
+            </Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [
+              styles.navItem,
+              pressed && styles.navItemPressed,
+              tab === 'trips' && styles.navItemActive,
+            ]}
+            onPress={() => setTab('trips')}
+          >
+            <Ionicons
+              name={tab === 'trips' ? 'time' : 'time-outline'}
+              size={NAV_ICON_SIZE}
+              color={tab === 'trips' ? BRAND_PRIMARY : ICON_INACTIVE}
+            />
+            <Text style={tab === 'trips' ? styles.navTextActive : styles.navText}>
+              Trajets
+            </Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [
+              styles.navItem,
+              pressed && styles.navItemPressed,
+              tab === 'account' && styles.navItemActive,
+            ]}
+            onPress={() => setTab('account')}
+          >
+            <Ionicons
+              name={tab === 'account' ? 'person' : 'person-outline'}
+              size={NAV_ICON_SIZE}
+              color={tab === 'account' ? BRAND_PRIMARY : ICON_INACTIVE}
+            />
+            <Text
+              style={tab === 'account' ? styles.navTextActive : styles.navText}
+            >
+              Compte
+            </Text>
+          </Pressable>
         </View>
-      ) : null}
-      <PlacesDestinationSection
-        location={location}
-        searchInput={searchInput}
-        onSearchChange={handleSearchChange}
-        suggestionsSuspended={suggestionsSuspended}
-        sessionToken={sessionToken}
-        onPickSuggestion={(item) => void handlePickSuggestion(item)}
-        pickingPlace={pickingPlace}
-        configError={configError}
-        detailsError={detailsError}
-      />
-      {pickupMode === 'manual' ? (
-        <PlacesPickupSection
-          location={location}
-          searchInput={pickupSearchInput}
-          onSearchChange={handlePickupSearchChange}
-          suggestionsSuspended={pickupSuggestionsSuspended}
-          sessionToken={pickupSessionToken}
-          onPickSuggestion={(item) => void handlePickPickupSuggestion(item)}
-          pickingPlace={pickupPickingPlace}
-          configError={configError}
-          detailsError={pickupDetailsError}
-          onUseGpsPress={() => {
-            setPickupMode('gps');
-            setStructuredPickup(null);
-            setPickupSearchInput('');
-            setPickupSuggestionsSuspended(false);
-            setPickupDetailsError(null);
-          }}
-        />
-      ) : (
-        <Pressable
-          style={({ pressed }) => [
-            styles.pickupManualButton,
-            pressed && styles.pickupManualButtonPressed,
-          ]}
-          onPress={() => setPickupMode('manual')}
-        >
-          <Text style={styles.pickupManualButtonText}>
-            Choisir un autre point de départ
-          </Text>
-        </Pressable>
-      )}
-    </>
+      </SafeAreaView>
+
+      <StatusBar barStyle="dark-content" />
+    </View>
   );
 }
 
@@ -1568,23 +2319,485 @@ export function ClientHomeScreen({
 
   return (
     <ClientStripeRoot publishableKey={stripePublishableKey}>
-      <SignedInShell
-        session={session}
+      <ClientHomeMiddleContent
+        userId={session.user.id}
+        stripePublishableConfigured={stripePublishableConfigured}
         profile={profile}
-        headline="Espace client"
         onDevResetRole={onDevResetRole}
-        middleContent={
-          <ClientHomeMiddleContent
-            userId={session.user.id}
-            stripePublishableConfigured={stripePublishableConfigured}
-          />
-        }
       />
     </ClientStripeRoot>
   );
 }
 
 const styles = StyleSheet.create({
+  boltRoot: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  tripSummarySafeTop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    paddingTop: (Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0) + 12,
+    paddingHorizontal: 72, // laisse respirer autour du bouton menu
+  },
+  tripSummaryBar: {
+    backgroundColor: '#fff',
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
+  tripSummaryIconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 999,
+    backgroundColor: '#f3f4f6',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tripSummaryIconBtnPressed: {
+    opacity: 0.9,
+  },
+  tripSummaryTextWrap: {
+    flex: 1,
+  },
+  tripSummaryText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  mapScrim: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 78,
+    height: 120,
+  },
+  safeTop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    paddingTop: (Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0) + 12,
+    paddingHorizontal: 16,
+  },
+  floatingMenuButton: {
+    width: 48,
+    height: 48,
+    borderRadius: 999,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
+  floatingMenuButtonPressed: {
+    opacity: 0.92,
+  },
+  floatingMenuIcon: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#0f172a',
+  },
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.35)',
+    padding: 16,
+    justifyContent: 'flex-start',
+  },
+  menuCard: {
+    marginTop: 56,
+    width: '100%',
+    maxWidth: 360,
+    borderRadius: 18,
+    backgroundColor: '#fff',
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+  },
+  menuTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0f172a',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  menuItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+  },
+  menuItemPressed: {
+    backgroundColor: '#f1f5f9',
+  },
+  menuItemText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  menuItemMuted: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#64748b',
+  },
+  bottomSheet: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 78,
+    maxHeight: '62%',
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 10,
+    paddingHorizontal: 20,
+    paddingBottom: 14,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -4 },
+    elevation: 8,
+  },
+  sheetGrabber: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 999,
+    backgroundColor: '#e5e7eb',
+    marginBottom: 12,
+  },
+  sheetBody: {
+    paddingHorizontal: 0,
+    paddingBottom: 0,
+  },
+  sheetContent: {
+    paddingBottom: 8,
+  },
+  sheetTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: '#0f172a',
+    marginBottom: 4,
+  },
+  sheetHint: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748b',
+    marginBottom: 14,
+  },
+  boltPriceCard: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 18,
+    backgroundColor: '#fff',
+    padding: 16,
+    marginTop: 6,
+    marginBottom: 6,
+  },
+  boltPriceLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#64748b',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  boltPriceValue: {
+    fontSize: 28,
+    fontWeight: '900',
+    color: BRAND_PRIMARY,
+    letterSpacing: -0.5,
+  },
+  boltPriceSub: {
+    marginTop: 4,
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  boltZones: {
+    marginTop: 10,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748b',
+    lineHeight: 18,
+  },
+  itinTeaserHeader: {
+    marginBottom: 12,
+  },
+  itinTeaserCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: '#f8fafc',
+    marginBottom: 6,
+  },
+  itinTeaserCardPressed: {
+    opacity: 0.92,
+  },
+  itinTeaserLeftRail: {
+    width: 18,
+    alignItems: 'center',
+  },
+  itinDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+  },
+  itinDotFilled: {
+    backgroundColor: '#0f172a',
+  },
+  itinDotHollow: {
+    borderWidth: 2,
+    borderColor: '#0f172a',
+    backgroundColor: 'transparent',
+  },
+  itinRailLine: {
+    width: 2,
+    flex: 1,
+    backgroundColor: '#cbd5e1',
+    marginVertical: 6,
+    borderRadius: 999,
+    minHeight: 14,
+  },
+  itinTeaserTexts: {
+    flex: 1,
+    gap: 8,
+  },
+  itinTeaserPickup: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  itinTeaserDestination: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#9ca3af',
+  },
+  itinRoot: {
+    flex: 1,
+    backgroundColor: '#fff',
+    paddingHorizontal: 20,
+  },
+  itinHeader: {
+    height: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  itinClose: {
+    width: 44,
+    height: 44,
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f3f4f6',
+  },
+  itinHeaderRight: {
+    width: 44,
+    height: 44,
+  },
+  itinTitle: {
+    fontSize: 17,
+    fontWeight: '900',
+    color: '#0f172a',
+  },
+  itinPressed: {
+    opacity: 0.9,
+  },
+  itinInputsCard: {
+    flexDirection: 'row',
+    gap: 12,
+    borderRadius: 16,
+    backgroundColor: '#f9fafb',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    padding: 14,
+    marginTop: 8,
+  },
+  itinLeftRail: {
+    width: 18,
+    alignItems: 'center',
+    paddingTop: 8,
+    paddingBottom: 8,
+  },
+  itinFields: {
+    flex: 1,
+    gap: 4,
+  },
+  itinRowSlot: {
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+    backgroundColor: 'transparent',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  itinRowSlotActive: {
+    borderColor: 'rgba(15, 118, 110, 0.45)',
+    backgroundColor: 'rgba(15, 118, 110, 0.07)',
+    shadowColor: BRAND_PRIMARY,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+  itinRow: {
+    minHeight: 56,
+    justifyContent: 'center',
+  },
+  itinRowLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#6b7280',
+    marginBottom: 4,
+  },
+  itinRowLabelActive: {
+    color: BRAND_PRIMARY,
+  },
+  itinPickupInput: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0f172a',
+    paddingVertical: 0,
+  },
+  itinDivider: {
+    height: 1,
+    backgroundColor: '#e5e7eb',
+  },
+  itinDestinationInput: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0f172a',
+    paddingVertical: 0,
+  },
+  itinError: {
+    marginTop: 12,
+    color: '#b91c1c',
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  itinLoadingRow: {
+    marginTop: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  itinLoadingText: {
+    color: '#64748b',
+    fontWeight: '600',
+  },
+  itinSuggestions: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  itinSuggestRow: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#e5e7eb',
+    backgroundColor: '#fff',
+  },
+  itinSuggestRowPressed: {
+    backgroundColor: '#f1f5f9',
+  },
+  itinSuggestPrimary: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  itinSuggestSecondary: {
+    marginTop: 2,
+    fontSize: 13,
+    color: '#64748b',
+  },
+  accountCard: {
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 18,
+    backgroundColor: '#fff',
+    padding: 14,
+    marginTop: 10,
+  },
+  accountLabel: {
+    fontSize: 12,
+    color: '#6b7280',
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+    marginBottom: 4,
+  },
+  accountLabelSpaced: {
+    marginTop: 12,
+  },
+  accountValue: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0f172a',
+  },
+  bottomNavSafe: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'transparent',
+  },
+  bottomNav: {
+    height: 78,
+    backgroundColor: '#fff',
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+  },
+  navItem: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 52,
+    paddingVertical: 6,
+    gap: 4,
+    borderRadius: 999,
+  },
+  navItemPressed: {
+    opacity: 0.9,
+  },
+  navItemActive: {
+    backgroundColor: '#f1f5f9',
+  },
+  navText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: ICON_INACTIVE,
+  },
+  navTextActive: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: BRAND_PRIMARY,
+  },
   summaryCard: {
     width: '100%',
     maxWidth: 400,
@@ -1630,17 +2843,15 @@ const styles = StyleSheet.create({
   },
   destinationBlock: {
     width: '100%',
-    maxWidth: 400,
-    marginBottom: 8,
-    padding: 16,
-    borderRadius: 12,
+    marginBottom: 10,
+    padding: 0,
+    borderRadius: 18,
     backgroundColor: '#fff',
-    borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderWidth: 0,
   },
   destinationTitle: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '800',
     color: '#0f172a',
     marginBottom: 6,
   },
@@ -1656,34 +2867,39 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginBottom: 10,
   },
-  destinationInput: {
+  destinationInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: 52,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    borderColor: '#e5e7eb',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    gap: 8,
+    backgroundColor: '#f3f4f6',
+    marginBottom: 10,
+  },
+  destinationInputRowFocused: {
+    borderColor: BRAND_PRIMARY,
+    backgroundColor: '#f8fafc',
+  },
+  destinationInputField: {
+    flex: 1,
+    height: 52,
+    paddingVertical: 0,
     fontSize: 16,
     color: '#0f172a',
-    backgroundColor: '#f8fafc',
-    marginBottom: 8,
   },
-  historyButton: {
-    width: '100%',
-    maxWidth: 400,
-    marginBottom: 12,
-    paddingVertical: 12,
-    borderRadius: 12,
-    backgroundColor: '#0f766e',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  historyButtonPressed: {
-    opacity: 0.92,
-  },
-  historyButtonText: {
-    color: '#fff',
-    fontWeight: '800',
+  pickupSearchInput: {
+    height: 52,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 16,
+    paddingHorizontal: 16,
     fontSize: 16,
+    color: '#0f172a',
+    backgroundColor: '#f3f4f6',
+    marginBottom: 10,
   },
   modalBackdrop: {
     flex: 1,
@@ -1755,12 +2971,11 @@ const styles = StyleSheet.create({
   },
   pickupManualButton: {
     width: '100%',
-    maxWidth: 400,
     marginBottom: 8,
     borderWidth: 2,
     borderColor: '#0f766e',
-    borderRadius: 12,
-    paddingVertical: 12,
+    borderRadius: 999,
+    height: 52,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#fff',
@@ -1912,11 +3127,12 @@ const styles = StyleSheet.create({
   },
   orderButton: {
     backgroundColor: '#0f766e',
-    paddingVertical: 14,
-    borderRadius: 12,
+    height: 56,
+    borderRadius: 999,
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 48,
+    marginTop: 16,
   },
   orderButtonPressed: {
     opacity: 0.92,
@@ -1972,10 +3188,10 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   orderPayButton: {
-    marginTop: 12,
+    marginTop: 16,
     backgroundColor: '#0f766e',
-    paddingVertical: 14,
-    borderRadius: 12,
+    height: 56,
+    borderRadius: 999,
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 48,
@@ -1996,9 +3212,9 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   orderCancelButton: {
-    marginTop: 12,
-    paddingVertical: 12,
-    borderRadius: 12,
+    marginTop: 14,
+    height: 52,
+    borderRadius: 999,
     borderWidth: 2,
     borderColor: '#0f766e',
     alignItems: 'center',

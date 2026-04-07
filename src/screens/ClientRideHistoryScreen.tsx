@@ -142,8 +142,8 @@ export function ClientRideHistoryScreen(props: {
 
 const styles = StyleSheet.create({
   root: {
+    flex: 1,
     width: '100%',
-    maxWidth: 420,
   },
   header: {
     width: '100%',
@@ -188,7 +188,7 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
   },
   list: {
-    paddingBottom: 12,
+    paddingBottom: 16,
   },
   rideCard: {
     borderWidth: 1,

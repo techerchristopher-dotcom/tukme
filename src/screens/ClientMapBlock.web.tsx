@@ -14,12 +14,13 @@ export function ClientMapBlock(props: {
   routeMetrics: RouteMetricsUiState;
   driverLat?: number | null;
   driverLng?: number | null;
+  variant?: 'card' | 'fullscreen';
 }) {
-  const { location, pickup, destination, routeMetrics } = props;
+  const { location, pickup, destination, routeMetrics, variant = 'card' } = props;
 
   if (!pickup && location.phase === 'loading') {
     return (
-      <View style={styles.mapSlot}>
+      <View style={variant === 'fullscreen' ? styles.mapSlotFullscreen : styles.mapSlot}>
         <ActivityIndicator size="large" color="#0f766e" />
         <Text style={styles.mapHint}>Recherche de votre position…</Text>
       </View>
@@ -28,7 +29,7 @@ export function ClientMapBlock(props: {
 
   if (!pickup && (location.phase === 'denied' || location.phase === 'error')) {
     return (
-      <View style={styles.mapSlot}>
+      <View style={variant === 'fullscreen' ? styles.mapSlotFullscreen : styles.mapSlot}>
         <Text style={styles.mapError}>{location.message}</Text>
       </View>
     );
@@ -41,22 +42,28 @@ export function ClientMapBlock(props: {
     : 'Carte — votre position';
 
   return (
-    <View style={styles.mapWrapper}>
-      <Text style={styles.mapTitle}>{mapTitle}</Text>
-      <Text style={styles.coords}>
-        Départ : {latitude.toFixed(5)}, {longitude.toFixed(5)}
-        {destination
-          ? `\nDestination : ${destination.latitude.toFixed(5)}, ${destination.longitude.toFixed(5)}`
-          : ''}
-      </Text>
-      <View style={styles.mapPlaceholder}>
+    <View style={variant === 'fullscreen' ? styles.mapFullscreen : styles.mapWrapper}>
+      {variant === 'card' ? (
+        <>
+          <Text style={styles.mapTitle}>{mapTitle}</Text>
+          <Text style={styles.coords}>
+            Départ : {latitude.toFixed(5)}, {longitude.toFixed(5)}
+            {destination
+              ? `\nDestination : ${destination.latitude.toFixed(5)}, ${destination.longitude.toFixed(5)}`
+              : ''}
+          </Text>
+        </>
+      ) : null}
+      <View
+        style={variant === 'fullscreen' ? styles.mapPlaceholderFullscreen : styles.mapPlaceholder}
+      >
         <Text style={styles.mapPlaceholderText}>
           La carte interactive est disponible sur l’application mobile
           (iOS/Android). Sur le web, vous pouvez commander et suivre la course
           via le texte ci-dessus.
         </Text>
       </View>
-      {destination ? (
+      {variant === 'card' && destination ? (
         <View style={styles.mapRouteRow}>
           {routeMetrics.loading ? (
             <View style={styles.mapRouteLoading}>

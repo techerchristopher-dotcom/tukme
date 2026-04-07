@@ -16,16 +16,17 @@ import {
 import { supabase } from './src/lib/supabase';
 import { ClientHomeScreen } from './src/screens/ClientHomeScreen';
 import { DriverHomeScreen } from './src/screens/DriverHomeScreen';
+import { PhoneSignInScreen } from './src/screens/PhoneSignInScreen';
 import { RoleSelectScreen } from './src/screens/RoleSelectScreen';
-import { SignInScreen } from './src/screens/SignInScreen';
 import { SignUpScreen } from './src/screens/SignUpScreen';
 import { isCompleteRole } from './src/types/profile';
+import { SignInScreen } from './src/screens/SignInScreen';
 
-type AuthView = 'signIn' | 'signUp';
+type AuthView = 'phone' | 'emailSignIn' | 'emailSignUp';
 
 export default function App() {
   const { session, ready } = useAuthSession();
-  const [authView, setAuthView] = useState<AuthView>('signIn');
+  const [authView, setAuthView] = useState<AuthView>('phone');
   const userId = session?.user.id;
   const { profile, loading: profileLoading, error: profileError, refresh } =
     useProfile(userId);
@@ -63,10 +64,27 @@ export default function App() {
   }
 
   if (!session) {
-    return authView === 'signIn' ? (
-      <SignInScreen onGoToSignUp={() => setAuthView('signUp')} />
-    ) : (
-      <SignUpScreen onGoToSignIn={() => setAuthView('signIn')} />
+    if (authView === 'phone') {
+      return (
+        <PhoneSignInScreen
+          onGoToSignUp={() => setAuthView('emailSignUp')}
+          onGoToEmailSignIn={() => setAuthView('emailSignIn')}
+        />
+      );
+    }
+    if (authView === 'emailSignUp') {
+      return (
+        <SignUpScreen
+          onGoToSignIn={() => setAuthView('emailSignIn')}
+          onGoBack={() => setAuthView('phone')}
+        />
+      );
+    }
+    return (
+      <SignInScreen
+        onGoToSignUp={() => setAuthView('emailSignUp')}
+        onGoBack={() => setAuthView('phone')}
+      />
     );
   }
 

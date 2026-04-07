@@ -47,8 +47,17 @@ export function ClientMapBlock(props: {
   routeMetrics: RouteMetricsUiState;
   driverLat?: number | null;
   driverLng?: number | null;
+  variant?: 'card' | 'fullscreen';
 }) {
-  const { location, pickup, destination, routeMetrics, driverLat, driverLng } = props;
+  const {
+    location,
+    pickup,
+    destination,
+    routeMetrics,
+    driverLat,
+    driverLng,
+    variant = 'card',
+  } = props;
 
   const mapRef = useRef<InstanceType<
     typeof import('react-native-maps').default
@@ -67,16 +76,19 @@ export function ClientMapBlock(props: {
     }
     const id = requestAnimationFrame(() => {
       mapRef.current?.fitToCoordinates(routeMetrics.polylineCoordinates!, {
-        edgePadding: { top: 52, right: 36, bottom: 88, left: 36 },
+        edgePadding:
+          variant === 'fullscreen'
+            ? { top: 120, right: 46, bottom: 320, left: 46 }
+            : { top: 52, right: 36, bottom: 88, left: 36 },
         animated: true,
       });
     });
     return () => cancelAnimationFrame(id);
-  }, [location.phase, pickup, destination, routeMetrics.polylineCoordinates]);
+  }, [location.phase, pickup, destination, routeMetrics.polylineCoordinates, variant]);
 
   if (!pickup && location.phase === 'loading') {
     return (
-      <View style={styles.mapSlot}>
+      <View style={variant === 'fullscreen' ? styles.mapSlotFullscreen : styles.mapSlot}>
         <ActivityIndicator size="large" color="#0f766e" />
         <Text style={styles.mapHint}>Recherche de votre position…</Text>
       </View>
@@ -85,7 +97,7 @@ export function ClientMapBlock(props: {
 
   if (!pickup && (location.phase === 'denied' || location.phase === 'error')) {
     return (
-      <View style={styles.mapSlot}>
+      <View style={variant === 'fullscreen' ? styles.mapSlotFullscreen : styles.mapSlot}>
         <Text style={styles.mapError}>{location.message}</Text>
       </View>
     );
@@ -106,25 +118,31 @@ export function ClientMapBlock(props: {
     : 'Carte — votre position';
 
   return (
-    <View style={styles.mapWrapper}>
-      <Text style={styles.mapTitle}>{mapTitle}</Text>
-      <Text style={styles.coords}>
-        Départ : {latitude.toFixed(5)}, {longitude.toFixed(5)}
-        {destination
-          ? `\nDestination : ${destination.latitude.toFixed(5)}, ${destination.longitude.toFixed(5)}`
-          : ''}
-      </Text>
+    <View style={variant === 'fullscreen' ? styles.mapFullscreen : styles.mapWrapper}>
+      {variant === 'card' ? (
+        <>
+          <Text style={styles.mapTitle}>{mapTitle}</Text>
+          <Text style={styles.coords}>
+            Départ : {latitude.toFixed(5)}, {longitude.toFixed(5)}
+            {destination
+              ? `\nDestination : ${destination.latitude.toFixed(5)}, ${destination.longitude.toFixed(5)}`
+              : ''}
+          </Text>
+        </>
+      ) : null}
       <MapView
         ref={mapRef}
-        style={styles.map}
+        style={variant === 'fullscreen' ? styles.mapFullscreenInner : styles.map}
         initialRegion={region}
         showsCompass
+        showsUserLocation={variant === 'fullscreen'}
+        showsMyLocationButton={false}
       >
-        <Marker
-          coordinate={{ latitude, longitude }}
-          title={pickup ? 'Point de départ' : 'Vous êtes ici'}
-          description={pickup?.label ?? undefined}
-        />
+        <Marker coordinate={{ latitude, longitude }} anchor={{ x: 0.5, y: 0.5 }}>
+          <View style={styles.userHalo}>
+            <View style={styles.userDot} />
+          </View>
+        </Marker>
         {typeof driverLat === 'number' &&
         Number.isFinite(driverLat) &&
         typeof driverLng === 'number' &&
@@ -157,7 +175,7 @@ export function ClientMapBlock(props: {
           />
         ) : null}
       </MapView>
-      {destination ? (
+      {variant === 'card' && destination ? (
         <View style={styles.mapRouteRow}>
           {routeMetrics.loading ? (
             <View style={styles.mapRouteLoading}>
