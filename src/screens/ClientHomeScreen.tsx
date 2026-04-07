@@ -1149,7 +1149,6 @@ function ClientHomeMiddleContent(props: {
       // On quitte l'écran dédié et on conserve pickup/destination/search inputs.
       setUiRideStatus('idle');
       dismissRide();
-      enterItineraryEdit();
       return;
     }
 
@@ -1176,7 +1175,6 @@ function ClientHomeMiddleContent(props: {
     ride?.estimated_price_eur,
     ride?.ride_completed_at,
     dismissRide,
-    enterItineraryEdit,
     resetAfterRide,
   ]);
 
@@ -1862,13 +1860,16 @@ function ClientHomeMiddleContent(props: {
         onEditRide={() => {
           // Pattern standard ride-hailing: modifier = stop matching (cancel) puis revenir à l’édition.
           void (async () => {
+            // Sortir explicitement de la vue "searching" pour rendre la modal.
+            setUiRideStatus('idle');
             if (ride?.id && ride.status === 'requested') {
               cancelForEditRef.current = true;
               await handleCancelPress();
+              // Après annulation, la ride est fermée (dismiss) et on peut ouvrir l’édition.
+              enterItineraryEdit();
               return;
             }
             // Si ce n’est pas une ride "requested", on peut revenir en édition sans annuler.
-            setUiRideStatus('idle');
             enterItineraryEdit();
           })();
         }}
