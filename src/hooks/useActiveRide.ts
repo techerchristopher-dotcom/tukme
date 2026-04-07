@@ -6,7 +6,7 @@ import type { ClientRideSnapshot, ClientRideStatus } from '../types/clientRide';
 const LOG = '[ride-realtime]';
 
 const RIDE_SELECT_COLUMNS =
-  'id, status, driver_id, updated_at, driver_lat, driver_lng, driver_location_updated_at, destination_label, destination_lat, destination_lng, destination_place_id, estimated_price_eur, payment_expires_at';
+  'id, status, driver_id, updated_at, driver_lat, driver_lng, driver_location_updated_at, pickup_label, destination_label, destination_lat, destination_lng, destination_place_id, estimated_price_eur, payment_expires_at, ride_completed_at';
 
 const OPEN_STATUSES: ClientRideStatus[] = [
   'requested',
@@ -147,6 +147,20 @@ function buildRideSnapshot(
     payment_expires_at = prev?.payment_expires_at ?? null;
   }
 
+  const pickup_label =
+    row.pickup_label === undefined
+      ? (prev?.pickup_label ?? null)
+      : row.pickup_label === null || typeof row.pickup_label === 'string'
+        ? (row.pickup_label as string | null)
+        : prev?.pickup_label ?? null;
+
+  const ride_completed_at =
+    row.ride_completed_at === undefined
+      ? (prev?.ride_completed_at ?? null)
+      : row.ride_completed_at === null || typeof row.ride_completed_at === 'string'
+        ? (row.ride_completed_at as string | null)
+        : prev?.ride_completed_at ?? null;
+
   if (destLat === undefined || destLng === undefined) {
     if (__DEV__ && prev) {
       console.warn(`${LOG} merge`, 'missing destination coords, keeping partial');
@@ -162,12 +176,14 @@ function buildRideSnapshot(
     driver_lat,
     driver_lng,
     driver_location_updated_at,
+    pickup_label,
     destination_label: destLabel,
     destination_lat: destLat,
     destination_lng: destLng,
     destination_place_id: destPlace,
     estimated_price_eur,
     payment_expires_at,
+    ride_completed_at,
   };
 }
 

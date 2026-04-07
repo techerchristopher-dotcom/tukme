@@ -16,6 +16,7 @@ import {
 import {
   ActivityIndicator,
   Keyboard,
+  Modal,
   Platform,
   Pressable,
   StyleSheet,
@@ -542,6 +543,15 @@ function ClientHomeMiddleContent(props: {
   const paymentExpirySyncDoneRef = useRef<string | null>(null);
   const terminalCleanupForRideIdRef = useRef<string | null>(null);
 
+  const [terminalSummary, setTerminalSummary] = useState<{
+    rideId: string;
+    pickup_label: string | null;
+    destination_label: string;
+    estimated_price_eur: number | null;
+    ride_completed_at: string | null;
+  } | null>(null);
+  const [showCompletionModal, setShowCompletionModal] = useState(false);
+
   const destinationForUi = useMemo((): ClientDestination | null => {
     if (structuredDestination) {
       return structuredDestination;
@@ -590,6 +600,48 @@ function ClientHomeMiddleContent(props: {
     return null;
   }, [pickupMode, structuredPickup, location, pickupLabel]);
 
+  const resetAfterRide = useCallback(
+    (nextView: 'home' | 'history' = 'home') => {
+      // Débloque immédiatement une nouvelle commande.
+      orderRequestInFlightRef.current = false;
+      cancelRequestInFlightRef.current = false;
+      paymentInFlightRef.current = false;
+
+      setOrderLoading(false);
+      setOrderError(null);
+      setCancelLoading(false);
+      setCancelError(null);
+      setPaymentError(null);
+      setPaymentSheetLoading(false);
+      setPaymentConfirmPending(false);
+      setRideOtp(null);
+      setRideOtpError(null);
+      otpFetchedForRideIdRef.current = null;
+
+      // Réinitialise la sélection destination/pickup (la position GPS reste intacte).
+      setStructuredDestination(null);
+      setSearchInput('');
+      setSuggestionsSuspended(false);
+      setDetailsError(null);
+      setStructuredPickup(null);
+      setPickupSearchInput('');
+      setPickupSuggestionsSuspended(false);
+      setPickupDetailsError(null);
+      if (location.phase === 'ready') {
+        setPickupMode('gps');
+      } else {
+        setPickupMode('manual');
+      }
+
+      setTerminalSummary(null);
+      setShowCompletionModal(false);
+      setView(nextView);
+
+      dismissRide();
+    },
+    [dismissRide, location.phase]
+  );
+
   useEffect(() => {
     const rideId = ride?.id ?? null;
     const st = ride?.status ?? null;
@@ -607,45 +659,29 @@ function ClientHomeMiddleContent(props: {
     }
     terminalCleanupForRideIdRef.current = rideId;
 
-    // Débloque immédiatement une nouvelle commande (sans attendre un timer Realtime).
-    orderRequestInFlightRef.current = false;
-    cancelRequestInFlightRef.current = false;
-    paymentInFlightRef.current = false;
-    setOrderLoading(false);
-    setOrderError(null);
-    setCancelLoading(false);
-    setCancelError(null);
-    setPaymentError(null);
-    setPaymentSheetLoading(false);
-    setPaymentConfirmPending(false);
-    setRideOtp(null);
-    setRideOtpError(null);
-    otpFetchedForRideIdRef.current = null;
-
-    // Réinitialise la sélection destination/pickup (la position GPS reste intacte).
-    setStructuredDestination(null);
-    setSearchInput('');
-    setSuggestionsSuspended(false);
-    setDetailsError(null);
-    setStructuredPickup(null);
-    setPickupSearchInput('');
-    setPickupSuggestionsSuspended(false);
-    setPickupDetailsError(null);
-    if (location.phase === 'ready') {
-      setPickupMode('gps');
-    } else {
-      setPickupMode('manual');
+    // UX fin de course : pour completed, on affiche un récap et on diffère le reset.
+    if (st === 'completed') {
+      setTerminalSummary({
+        rideId,
+        pickup_label: ride?.pickup_label ?? null,
+        destination_label: ride?.destination_label ?? 'Destination',
+        estimated_price_eur: ride?.estimated_price_eur ?? null,
+        ride_completed_at: ride?.ride_completed_at ?? null,
+      });
+      setShowCompletionModal(true);
+      return;
     }
 
-    // Nettoie la ride active (retour à l'état prêt à commander).
-    dismissRide();
+    // Autres statuts terminaux: reset immédiat (MVP stable).
+    resetAfterRide('home');
   }, [
     ride?.id,
     ride?.status,
-    location.phase,
-    dismissRide,
-    setRideOtp,
-    setRideOtpError,
+    ride?.pickup_label,
+    ride?.destination_label,
+    ride?.estimated_price_eur,
+    ride?.ride_completed_at,
+    resetAfterRide,
   ]);
 
   useEffect(() => {
@@ -1197,6 +1233,75 @@ function ClientHomeMiddleContent(props: {
 
   return (
     <>
+      <Modal
+        visible={showCompletionModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => resetAfterRide('home')}
+      >
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => resetAfterRide('home')}
+        >
+          <Pressable style={styles.modalCard} onPress={() => undefined}>
+            <Text style={styles.modalTitle}>Course terminée</Text>
+            <Text style={styles.modalRoute} numberOfLines={3}>
+              {(terminalSummary?.pickup_label?.trim() || pickupForUi?.label || 'Départ') +
+                ' → ' +
+                (terminalSummary?.destination_label?.trim() || destinationForUi?.label || 'Destination')}
+            </Text>
+            <Text style={styles.modalLine}>
+              Estimation :{' '}
+              {terminalSummary?.estimated_price_eur != null &&
+              Number.isFinite(terminalSummary.estimated_price_eur)
+                ? `${terminalSummary.estimated_price_eur.toFixed(2)} €`
+                : '—'}
+            </Text>
+            <Text style={styles.modalLine}>
+              {(() => {
+                const raw = terminalSummary?.ride_completed_at?.trim();
+                const ms = raw ? Date.parse(raw) : NaN;
+                const d = Number.isFinite(ms) ? new Date(ms) : new Date();
+                return `Terminée le ${d.toLocaleString('fr-FR', {
+                  dateStyle: 'medium',
+                  timeStyle: 'short',
+                })}`;
+              })()}
+            </Text>
+
+            <View style={styles.modalButtons}>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalBtnSecondary,
+                  pressed && styles.modalBtnPressed,
+                ]}
+                onPress={() => resetAfterRide('home')}
+              >
+                <Text style={styles.modalBtnSecondaryText}>Fermer</Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalBtnSecondary,
+                  pressed && styles.modalBtnPressed,
+                ]}
+                onPress={() => resetAfterRide('history')}
+              >
+                <Text style={styles.modalBtnSecondaryText}>Voir mes courses</Text>
+              </Pressable>
+              <Pressable
+                style={({ pressed }) => [
+                  styles.modalBtnPrimary,
+                  pressed && styles.modalBtnPressed,
+                ]}
+                onPress={() => resetAfterRide('home')}
+              >
+                <Text style={styles.modalBtnPrimaryText}>Commander à nouveau</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
       <TripSummaryCard
         location={location}
         pickupMode={pickupMode}
@@ -1579,6 +1684,74 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: '800',
     fontSize: 16,
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 23, 42, 0.55)',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    padding: 16,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 420,
+    borderRadius: 16,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+    padding: 16,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: '#0f172a',
+    marginBottom: 10,
+  },
+  modalRoute: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#0f172a',
+    lineHeight: 21,
+    marginBottom: 10,
+  },
+  modalLine: {
+    fontSize: 13,
+    color: '#475569',
+    lineHeight: 18,
+    marginBottom: 6,
+  },
+  modalButtons: {
+    marginTop: 12,
+    gap: 10,
+  },
+  modalBtnPrimary: {
+    backgroundColor: '#0f766e',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalBtnPrimaryText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 16,
+  },
+  modalBtnSecondary: {
+    borderWidth: 2,
+    borderColor: '#0f766e',
+    borderRadius: 12,
+    paddingVertical: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  modalBtnSecondaryText: {
+    color: '#0f766e',
+    fontWeight: '800',
+    fontSize: 15,
+  },
+  modalBtnPressed: {
+    opacity: 0.92,
   },
   pickupManualButton: {
     width: '100%',

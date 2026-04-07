@@ -29,8 +29,12 @@ export type ClientRideSnapshot = {
   destination_lat: number;
   destination_lng: number;
   destination_place_id: string | null;
+  /** Libellé départ persisté en base (peut être null si reverse geocode a échoué). */
+  pickup_label: string | null;
   /** Estimation EUR persistée (paiement Edge Function). */
   estimated_price_eur: number | null;
   /** Fin de fenêtre de paiement (UTC, ISO) ; défini une seule fois côté serveur. */
   payment_expires_at: string | null;
+  /** Horodatage fin de course (UTC ISO), si complétée. */
+  ride_completed_at: string | null;
 };
