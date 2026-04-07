@@ -14,8 +14,7 @@ type StopStatus =
   | 'in_progress'
   | 'completed'
   | 'cancelled_by_driver'
-  | 'cancelled_by_client'
-  | 'accepted';
+  | 'cancelled_by_client';
 
 function shouldTrack(status: string | null): status is TrackStatus {
   return status === 'paid' || status === 'en_route' || status === 'arrived';
@@ -29,8 +28,7 @@ function shouldStop(status: string | null): status is StopStatus {
     status === 'cancelled_by_client' ||
     status === 'expired' ||
     status === 'requested' ||
-    status === 'awaiting_payment' ||
-    status === 'accepted'
+    status === 'awaiting_payment'
   );
 }
 

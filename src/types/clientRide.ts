@@ -5,8 +5,6 @@ export type ClientRideStatus =
   | 'paid'
   | 'en_route'
   | 'arrived'
-  /** Conservé pour anciennes lignes / enum DB ; ne plus utiliser côté app. */
-  | 'accepted'
   | 'in_progress'
   | 'completed'
   | 'cancelled_by_client'

@@ -42,19 +42,20 @@ function regionIncludingBoth(
 
 export function ClientMapBlock(props: {
   location: ClientLocationState;
+  pickup?: { latitude: number; longitude: number; label?: string | null } | null;
   destination: ClientDestination | null;
   routeMetrics: RouteMetricsUiState;
   driverLat?: number | null;
   driverLng?: number | null;
 }) {
-  const { location, destination, routeMetrics, driverLat, driverLng } = props;
+  const { location, pickup, destination, routeMetrics, driverLat, driverLng } = props;
 
   const mapRef = useRef<InstanceType<
     typeof import('react-native-maps').default
   > | null>(null);
 
   useEffect(() => {
-    if (location.phase !== 'ready') {
+    if (!pickup && location.phase !== 'ready') {
       return;
     }
     if (
@@ -71,9 +72,9 @@ export function ClientMapBlock(props: {
       });
     });
     return () => cancelAnimationFrame(id);
-  }, [location.phase, destination, routeMetrics.polylineCoordinates]);
+  }, [location.phase, pickup, destination, routeMetrics.polylineCoordinates]);
 
-  if (location.phase === 'loading') {
+  if (!pickup && location.phase === 'loading') {
     return (
       <View style={styles.mapSlot}>
         <ActivityIndicator size="large" color="#0f766e" />
@@ -82,7 +83,7 @@ export function ClientMapBlock(props: {
     );
   }
 
-  if (location.phase === 'denied' || location.phase === 'error') {
+  if (!pickup && (location.phase === 'denied' || location.phase === 'error')) {
     return (
       <View style={styles.mapSlot}>
         <Text style={styles.mapError}>{location.message}</Text>
@@ -90,7 +91,8 @@ export function ClientMapBlock(props: {
     );
   }
 
-  const { latitude, longitude } = location;
+  const latitude = pickup ? pickup.latitude : location.latitude;
+  const longitude = pickup ? pickup.longitude : location.longitude;
   const region = regionIncludingBoth(latitude, longitude, destination);
 
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -107,7 +109,7 @@ export function ClientMapBlock(props: {
     <View style={styles.mapWrapper}>
       <Text style={styles.mapTitle}>{mapTitle}</Text>
       <Text style={styles.coords}>
-        Vous : {latitude.toFixed(5)}, {longitude.toFixed(5)}
+        Départ : {latitude.toFixed(5)}, {longitude.toFixed(5)}
         {destination
           ? `\nDestination : ${destination.latitude.toFixed(5)}, ${destination.longitude.toFixed(5)}`
           : ''}
@@ -118,7 +120,11 @@ export function ClientMapBlock(props: {
         initialRegion={region}
         showsCompass
       >
-        <Marker coordinate={{ latitude, longitude }} title="Vous êtes ici" />
+        <Marker
+          coordinate={{ latitude, longitude }}
+          title={pickup ? 'Point de départ' : 'Vous êtes ici'}
+          description={pickup?.label ?? undefined}
+        />
         {typeof driverLat === 'number' &&
         Number.isFinite(driverLat) &&
         typeof driverLng === 'number' &&

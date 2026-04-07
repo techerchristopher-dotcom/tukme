@@ -14,7 +14,6 @@ const OPEN_STATUSES: ClientRideStatus[] = [
   'paid',
   'en_route',
   'arrived',
-  'accepted',
   'in_progress',
 ];
 
@@ -59,7 +58,9 @@ function buildRideSnapshot(
   const statusRaw = row.status;
   const status =
     typeof statusRaw === 'string'
-      ? (statusRaw as ClientRideStatus)
+      ? statusRaw === 'accepted'
+        ? ('awaiting_payment' as ClientRideStatus)
+        : (statusRaw as ClientRideStatus)
       : prev?.status;
   const updated_at =
     typeof row.updated_at === 'string' ? row.updated_at : prev?.updated_at;

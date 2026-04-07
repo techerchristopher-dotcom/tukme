@@ -45,6 +45,7 @@ import {
 } from '../lib/cancelRide';
 import { invokeCreatePaymentIntent } from '../lib/createPaymentIntent';
 import { insertRequestedRide } from '../lib/createRide';
+import { notifyRideEvent } from '../lib/pushNotifications';
 import { syncRidePaymentExpiryIfDue } from '../lib/syncRidePaymentExpiry';
 import { useActiveRide } from '../hooks/useActiveRide';
 import { formatAriary } from '../lib/taxiPricing';
@@ -77,8 +78,6 @@ function clientRideStatusMessage(status: ClientRideStatus): string {
       return 'Chauffeur en route.';
     case 'arrived':
       return 'Chauffeur arrivé.';
-    case 'accepted':
-      return 'Chauffeur trouvé — paiement requis.';
     case 'in_progress':
       return 'Course en cours.';
     case 'completed':
@@ -132,10 +131,30 @@ function formatCurrentPositionText(location: ClientLocationState): string {
 
 function TripSummaryCard(props: {
   location: ClientLocationState;
+  pickupMode?: 'gps' | 'manual';
+  pickup: ClientDestination | null;
   destination: ClientDestination | null;
 }) {
-  const { location, destination } = props;
+  const { location, pickupMode, pickup, destination } = props;
   const positionLine = formatCurrentPositionText(location);
+
+  const pickupBlock = pickup ? (
+    <>
+      <Text style={styles.summaryValue}>{pickup.label}</Text>
+      <Text style={styles.summaryCoords}>
+        {pickup.latitude.toFixed(5)}, {pickup.longitude.toFixed(5)}
+      </Text>
+      {pickupMode === 'manual' ? (
+        <Text style={styles.summaryHint}>Départ choisi manuellement</Text>
+      ) : null}
+    </>
+  ) : (
+    <Text style={styles.summaryValue}>
+      {pickupMode === 'manual'
+        ? 'Choisissez un point de départ.'
+        : 'Position en cours…'}
+    </Text>
+  );
 
   let destinationBlock: ReactNode;
   if (!destination) {
@@ -160,6 +179,10 @@ function TripSummaryCard(props: {
       <Text style={styles.summaryTitle}>Votre trajet</Text>
       <Text style={styles.summaryLabel}>Position actuelle</Text>
       <Text style={styles.summaryValue}>{positionLine}</Text>
+      <Text style={[styles.summaryLabel, styles.summaryLabelSpaced]}>
+        Départ
+      </Text>
+      {pickupBlock}
       <Text style={[styles.summaryLabel, styles.summaryLabelSpaced]}>
         Destination
       </Text>
@@ -345,6 +368,118 @@ function PlacesDestinationSection(props: {
   );
 }
 
+function PlacesPickupSection(props: {
+  location: ClientLocationState;
+  searchInput: string;
+  onSearchChange: (value: string) => void;
+  suggestionsSuspended: boolean;
+  sessionToken: string;
+  onPickSuggestion: (item: PlaceSuggestionItem) => void;
+  pickingPlace: boolean;
+  configError: string | null;
+  detailsError: string | null;
+  onUseGpsPress: () => void;
+}) {
+  const {
+    location,
+    searchInput,
+    onSearchChange,
+    suggestionsSuspended,
+    sessionToken,
+    onPickSuggestion,
+    pickingPlace,
+    configError,
+    detailsError,
+    onUseGpsPress,
+  } = props;
+
+  const biasLat = location.phase === 'ready' ? location.latitude : null;
+  const biasLng = location.phase === 'ready' ? location.longitude : null;
+
+  const { suggestions, loading, error } = usePlacesSuggestions({
+    query: searchInput,
+    sessionToken,
+    biasLat,
+    biasLng,
+    suspended: suggestionsSuspended,
+  });
+
+  const showSuggestions =
+    !suggestionsSuspended && suggestions.length > 0 && !pickingPlace;
+
+  return (
+    <View style={styles.destinationBlock}>
+      <Text style={styles.destinationTitle}>Point de départ</Text>
+      <Text style={styles.destinationHint}>
+        Par défaut, Tukme utilise votre position actuelle. Vous pouvez choisir un
+        autre point de récupération via Google Places.
+      </Text>
+
+      <Pressable
+        style={({ pressed }) => [
+          styles.pickupGpsButton,
+          pressed && styles.pickupGpsButtonPressed,
+        ]}
+        onPress={onUseGpsPress}
+      >
+        <Text style={styles.pickupGpsButtonText}>Utiliser ma position actuelle</Text>
+      </Pressable>
+
+      {configError ? <Text style={styles.geocodeError}>{configError}</Text> : null}
+
+      <TextInput
+        style={styles.destinationInput}
+        value={searchInput}
+        onChangeText={onSearchChange}
+        placeholder="Chercher un point de départ…"
+        placeholderTextColor="#94a3b8"
+        returnKeyType="search"
+        autoCorrect={false}
+        autoCapitalize="none"
+        editable={!pickingPlace && !configError}
+      />
+
+      {loading ? (
+        <View style={styles.suggestLoading}>
+          <ActivityIndicator size="small" color="#0f766e" />
+          <Text style={styles.suggestLoadingText}>Recherche…</Text>
+        </View>
+      ) : null}
+
+      {error ? <Text style={styles.geocodeError}>{error}</Text> : null}
+
+      {detailsError ? <Text style={styles.geocodeError}>{detailsError}</Text> : null}
+
+      {showSuggestions ? (
+        <View style={styles.suggestionsBox}>
+          {suggestions.map((item) => (
+            <Pressable
+              key={item.placeId}
+              style={({ pressed }) => [
+                styles.suggestionRow,
+                pressed && styles.suggestionRowPressed,
+              ]}
+              onPress={() => onPickSuggestion(item)}
+            >
+              <Text style={styles.suggestionPrimary}>{item.primaryText}</Text>
+              {item.secondaryText ? (
+                <Text style={styles.suggestionSecondary}>{item.secondaryText}</Text>
+              ) : null}
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+
+      {pickingPlace ? (
+        <View style={styles.pickingRow}>
+          <ActivityIndicator size="small" color="#0f766e" />
+          <Text style={styles.pickingText}>Récupération du lieu…</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function ClientHomeMiddleContent(props: {
   userId: string;
   stripePublishableConfigured: boolean;
@@ -365,6 +500,17 @@ function ClientHomeMiddleContent(props: {
   const [searchInput, setSearchInput] = useState('');
   const [structuredDestination, setStructuredDestination] =
     useState<ClientDestination | null>(null);
+  const [pickupMode, setPickupMode] = useState<'gps' | 'manual'>('gps');
+  const [pickupSearchInput, setPickupSearchInput] = useState('');
+  const [structuredPickup, setStructuredPickup] =
+    useState<ClientDestination | null>(null);
+  const [pickupSuggestionsSuspended, setPickupSuggestionsSuspended] =
+    useState(false);
+  const [pickupPickingPlace, setPickupPickingPlace] = useState(false);
+  const [pickupSessionToken, setPickupSessionToken] = useState(newSessionToken);
+  const [pickupDetailsError, setPickupDetailsError] = useState<string | null>(
+    null
+  );
   const [suggestionsSuspended, setSuggestionsSuspended] = useState(false);
   const [pickingPlace, setPickingPlace] = useState(false);
   const [sessionToken, setSessionToken] = useState(newSessionToken);
@@ -412,6 +558,28 @@ function ClientHomeMiddleContent(props: {
     }
     return null;
   }, [structuredDestination, ride]);
+
+  useEffect(() => {
+    if (pickupMode === 'gps' && (location.phase === 'denied' || location.phase === 'error')) {
+      setPickupMode('manual');
+    }
+  }, [pickupMode, location.phase]);
+
+  const pickupForUi = useMemo((): ClientDestination | null => {
+    if (pickupMode === 'manual') {
+      return structuredPickup;
+    }
+    if (location.phase === 'ready') {
+      const label = pickupLabel?.trim() || 'Position actuelle';
+      return {
+        label,
+        latitude: location.latitude,
+        longitude: location.longitude,
+        placeId: undefined,
+      };
+    }
+    return null;
+  }, [pickupMode, structuredPickup, location, pickupLabel]);
 
   useEffect(() => {
     if (!ride || !hasOpenRide) {
@@ -493,12 +661,13 @@ function ClientHomeMiddleContent(props: {
     void syncRidePaymentExpiryIfDue(ride.id);
   }, [ride?.id, ride?.status, ride?.payment_expires_at, paymentWindowExpired]); // eslint-disable-line react-hooks/exhaustive-deps -- ride utilisé sous garde
 
-  const pickupLat =
-    location.phase === 'ready' ? location.latitude : null;
-  const pickupLng =
-    location.phase === 'ready' ? location.longitude : null;
+  const pickupLat = pickupForUi ? pickupForUi.latitude : null;
+  const pickupLng = pickupForUi ? pickupForUi.longitude : null;
 
   useEffect(() => {
+    if (pickupMode !== 'gps') {
+      return;
+    }
     if (pickupLat == null || pickupLng == null) {
       setPickupLabel(null);
       return;
@@ -537,7 +706,7 @@ function ClientHomeMiddleContent(props: {
     return () => {
       cancelled = true;
     };
-  }, [pickupLat, pickupLng]);
+  }, [pickupMode, pickupLat, pickupLng]);
 
   const ridePricing = useRideZonePricing({
     pickupLat,
@@ -671,6 +840,21 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
+  function handlePickupSearchChange(value: string) {
+    setPickupSearchInput(value);
+    setPickupSuggestionsSuspended(false);
+    setPickupDetailsError(null);
+    setOrderError(null);
+    setCancelError(null);
+    orderRequestInFlightRef.current = false;
+    if (structuredPickup) {
+      setStructuredPickup(null);
+    }
+    if (pickupMode !== 'manual') {
+      setPickupMode('manual');
+    }
+  }
+
   async function handleOrderPress() {
     if (
       !canOrder ||
@@ -733,6 +917,7 @@ function ClientHomeMiddleContent(props: {
         route_polyline: routeMetrics.encodedPolyline,
       });
       await registerRideAfterCreate(id);
+      void notifyRideEvent({ event: 'ride_created', rideId: id });
       setCancelError(null);
     } catch (e) {
       setOrderError(
@@ -761,6 +946,7 @@ function ClientHomeMiddleContent(props: {
     setCancelError(null);
     try {
       await cancelRideAsClient(rideId);
+      void notifyRideEvent({ event: 'ride_cancelled', rideId });
       dismissRide();
       orderRequestInFlightRef.current = false;
     } catch (e) {
@@ -895,14 +1081,63 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
+  async function handlePickPickupSuggestion(item: PlaceSuggestionItem) {
+    Keyboard.dismiss();
+    if (configError) {
+      return;
+    }
+    setPickupMode('manual');
+    setPickupPickingPlace(true);
+    setPickupDetailsError(null);
+    try {
+      const token = pickupSessionToken;
+      const details = await fetchPlaceDetails({
+        placeId: item.placeId,
+        sessionToken: token,
+      });
+      setOrderError(null);
+      setCancelError(null);
+      orderRequestInFlightRef.current = false;
+      setStructuredPickup({
+        label: details.label,
+        latitude: details.latitude,
+        longitude: details.longitude,
+        placeId: details.placeId,
+      });
+      setPickupSearchInput(details.label);
+      setPickupSuggestionsSuspended(true);
+      setPickupSessionToken(newSessionToken());
+    } catch (e) {
+      setStructuredPickup(null);
+      setPickupSearchInput(item.fullDescription);
+      setPickupSuggestionsSuspended(false);
+      setPickupDetailsError(
+        e instanceof Error ? e.message : 'Impossible de récupérer ce lieu. Réessayez.'
+      );
+    } finally {
+      setPickupPickingPlace(false);
+    }
+  }
+
   return (
     <>
       <TripSummaryCard
         location={location}
+        pickupMode={pickupMode}
+        pickup={pickupForUi}
         destination={destinationForUi}
       />
       <ClientMapBlock
         location={location}
+        pickup={
+          pickupForUi
+            ? {
+                latitude: pickupForUi.latitude,
+                longitude: pickupForUi.longitude,
+                label: pickupForUi.label,
+              }
+            : null
+        }
         destination={destinationForUi}
         routeMetrics={routeMetrics}
         driverLat={ride?.driver_lat ?? null}
@@ -984,7 +1219,6 @@ function ClientHomeMiddleContent(props: {
                 ride.status === 'paid' ||
                 ride.status === 'en_route' ||
                 ride.status === 'arrived' ||
-                ride.status === 'accepted' ||
                 ride.status === 'in_progress'
                   ? styles.orderSuccess
                   : styles.orderRideTerminal
@@ -1095,6 +1329,38 @@ function ClientHomeMiddleContent(props: {
         configError={configError}
         detailsError={detailsError}
       />
+      {pickupMode === 'manual' ? (
+        <PlacesPickupSection
+          location={location}
+          searchInput={pickupSearchInput}
+          onSearchChange={handlePickupSearchChange}
+          suggestionsSuspended={pickupSuggestionsSuspended}
+          sessionToken={pickupSessionToken}
+          onPickSuggestion={(item) => void handlePickPickupSuggestion(item)}
+          pickingPlace={pickupPickingPlace}
+          configError={configError}
+          detailsError={pickupDetailsError}
+          onUseGpsPress={() => {
+            setPickupMode('gps');
+            setStructuredPickup(null);
+            setPickupSearchInput('');
+            setPickupSuggestionsSuspended(false);
+            setPickupDetailsError(null);
+          }}
+        />
+      ) : (
+        <Pressable
+          style={({ pressed }) => [
+            styles.pickupManualButton,
+            pressed && styles.pickupManualButtonPressed,
+          ]}
+          onPress={() => setPickupMode('manual')}
+        >
+          <Text style={styles.pickupManualButtonText}>
+            Choisir un autre point de départ
+          </Text>
+        </Pressable>
+      )}
     </>
   );
 }
@@ -1167,6 +1433,11 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontVariant: ['tabular-nums'],
   },
+  summaryHint: {
+    marginTop: 6,
+    fontSize: 12,
+    color: '#64748b',
+  },
   destinationBlock: {
     width: '100%',
     maxWidth: 400,
@@ -1205,6 +1476,43 @@ const styles = StyleSheet.create({
     color: '#0f172a',
     backgroundColor: '#f8fafc',
     marginBottom: 8,
+  },
+  pickupManualButton: {
+    width: '100%',
+    maxWidth: 400,
+    marginBottom: 8,
+    borderWidth: 2,
+    borderColor: '#0f766e',
+    borderRadius: 12,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+  },
+  pickupManualButtonPressed: {
+    backgroundColor: '#f0fdfa',
+    opacity: 0.92,
+  },
+  pickupManualButtonText: {
+    color: '#0f766e',
+    fontWeight: '700',
+    fontSize: 16,
+  },
+  pickupGpsButton: {
+    alignSelf: 'flex-start',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    backgroundColor: '#f1f5f9',
+    marginBottom: 10,
+  },
+  pickupGpsButtonPressed: {
+    opacity: 0.9,
+  },
+  pickupGpsButtonText: {
+    color: '#0f766e',
+    fontWeight: '700',
+    fontSize: 14,
   },
   geocodeError: {
     fontSize: 13,

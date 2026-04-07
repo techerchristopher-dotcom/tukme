@@ -22,6 +22,7 @@ import {
   rpcStartEnRoute,
   rpcStartRide,
 } from '../lib/driverRideProgress';
+import { notifyRideEvent } from '../lib/pushNotifications';
 import { supabase } from '../lib/supabase';
 import type { Profile } from '../types/profile';
 
@@ -174,6 +175,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
         await rpcStartEnRoute(rideId);
       } else if (step === 'arrived') {
         await rpcMarkArrived(rideId);
+        void notifyRideEvent({ event: 'driver_arrived', rideId });
       } else {
         await rpcStartRide(rideId);
       }
@@ -473,6 +475,7 @@ function DriverRequestsBlock() {
       void fetchOpen();
       return;
     }
+    void notifyRideEvent({ event: 'ride_accepted', rideId });
     void fetchOpen();
   }
 

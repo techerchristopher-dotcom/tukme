@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -9,6 +9,10 @@ import {
 
 import { useAuthSession } from './src/hooks/useAuthSession';
 import { useProfile } from './src/hooks/useProfile';
+import {
+  registerForPushNotificationsIfPossible,
+  wirePushListeners,
+} from './src/lib/pushNotifications';
 import { supabase } from './src/lib/supabase';
 import { ClientHomeScreen } from './src/screens/ClientHomeScreen';
 import { DriverHomeScreen } from './src/screens/DriverHomeScreen';
@@ -25,6 +29,22 @@ export default function App() {
   const userId = session?.user.id;
   const { profile, loading: profileLoading, error: profileError, refresh } =
     useProfile(userId);
+
+  useEffect(() => {
+    if (!session?.user?.id) {
+      return;
+    }
+    void registerForPushNotificationsIfPossible(session.user.id);
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    const sub = wirePushListeners({
+      onTap: () => {
+        // MVP: no navigation yet, keep listener for later.
+      },
+    });
+    return () => sub.remove();
+  }, []);
 
   const devResetRole = useCallback(async () => {
     if (!userId) {
