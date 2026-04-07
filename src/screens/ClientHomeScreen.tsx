@@ -905,9 +905,17 @@ function ClientHomeMiddleContent(props: {
   const orderCta = usePressScale(0.98);
   const payCta = usePressScale(0.98);
 
-  const hasTripSelected =
-    !!pickupForUi?.label?.trim() && !!destinationForUi?.label?.trim();
-  const showBoltTripSummary = !ride && structuredDestination != null && hasTripSelected;
+  // État “trajet déjà choisi” = destination fixée, pas encore de ride.
+  // Il doit basculer sur un écran résumé (type Bolt) sans aucune UI de saisie.
+  const showBoltTripSummary = !ride && structuredDestination != null;
+
+  function splitAddress(label: string): { primary: string; secondary: string | null } {
+    const raw = label.trim();
+    if (!raw) return { primary: '—', secondary: null };
+    const parts = raw.split(',').map((p) => p.trim()).filter(Boolean);
+    if (parts.length <= 1) return { primary: raw, secondary: null };
+    return { primary: parts[0], secondary: parts.slice(1).join(', ') };
+  }
 
   const destinationForUi = useMemo((): ClientDestination | null => {
     if (structuredDestination) {
@@ -1320,6 +1328,10 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
+  function openItineraryFromSummary() {
+    setItineraryOpen(true);
+  }
+
   function handlePickupSearchChange(value: string) {
     setPickupSearchInput(value);
     setPickupChoice('manual');
@@ -1677,15 +1689,14 @@ function ClientHomeMiddleContent(props: {
                 styles.tripSummaryIconBtn,
                 pressed && styles.tripSummaryIconBtnPressed,
               ]}
-              onPress={resetTripSelection}
+              onPress={openItineraryFromSummary}
             >
               <Ionicons name="close" size={18} color="#0f172a" />
             </Pressable>
 
             <View style={styles.tripSummaryTextWrap}>
               <Text style={styles.tripSummaryText} numberOfLines={1}>
-                {pickupForUi?.label?.trim() || 'Départ'} →{' '}
-                {destinationForUi?.label?.trim() || 'Destination'}
+                {(pickupForUi?.label?.trim() || 'Emplacement actuel') + ' → ' + (destinationForUi?.label?.trim() || 'Destination')}
               </Text>
             </View>
 
@@ -1955,14 +1966,86 @@ function ClientHomeMiddleContent(props: {
               </>
             ) : showBoltTripSummary ? (
               <>
-                <Text style={styles.sheetTitle}>Votre trajet</Text>
-                <Text style={styles.sheetHint} numberOfLines={2}>
-                  {pickupForUi?.label?.trim() || 'Départ'} →{' '}
-                  {destinationForUi?.label?.trim() || 'Destination'}
-                </Text>
-
                 <View style={styles.boltPriceCard}>
                   <Text style={styles.boltPriceLabel}>Estimation</Text>
+
+                  <View style={styles.boltTripRow}>
+                    <View style={styles.boltTripColLeft}>
+                      <View style={styles.boltTripLabelRow}>
+                        <View
+                          style={[styles.boltTripDot, styles.boltTripDotPickup]}
+                        />
+                        <Text style={styles.boltTripLabel} numberOfLines={1}>
+                          Départ
+                        </Text>
+                      </View>
+                      {(() => {
+                        const label =
+                          pickupForUi?.label?.trim() || 'Emplacement actuel';
+                        const a = splitAddress(label);
+                        return (
+                          <>
+                            <Text style={styles.boltTripValuePrimary} numberOfLines={1}>
+                              {a.primary}
+                            </Text>
+                            {a.secondary ? (
+                              <Text style={styles.boltTripValueSecondary} numberOfLines={1}>
+                                {a.secondary}
+                              </Text>
+                            ) : null}
+                          </>
+                        );
+                      })()}
+                    </View>
+
+                    <View style={styles.boltTripArrowCol}>
+                      <Ionicons
+                        name="arrow-forward"
+                        size={18}
+                        color="#94a3b8"
+                      />
+                    </View>
+
+                    <View style={styles.boltTripColRight}>
+                      <View style={styles.boltTripLabelRowRight}>
+                        <Text style={styles.boltTripLabel} numberOfLines={1}>
+                          Arrivée
+                        </Text>
+                        <View
+                          style={[styles.boltTripDot, styles.boltTripDotDest]}
+                        />
+                      </View>
+                      {(() => {
+                        const label = destinationForUi?.label?.trim() || '—';
+                        const a = splitAddress(label);
+                        return (
+                          <>
+                            <Text
+                              style={[
+                                styles.boltTripValuePrimary,
+                                styles.boltTripValueRight,
+                              ]}
+                              numberOfLines={1}
+                            >
+                              {a.primary}
+                            </Text>
+                            {a.secondary ? (
+                              <Text
+                                style={[
+                                  styles.boltTripValueSecondary,
+                                  styles.boltTripValueRight,
+                                ]}
+                                numberOfLines={1}
+                              >
+                                {a.secondary}
+                              </Text>
+                            ) : null}
+                          </>
+                        );
+                      })()}
+                    </View>
+                  </View>
+
                   <Text style={styles.boltPriceValue}>
                     {ridePricing?.estimatedPriceEuro != null &&
                     Number.isFinite(ridePricing.estimatedPriceEuro)
@@ -1976,23 +2059,6 @@ function ClientHomeMiddleContent(props: {
                     </Text>
                   ) : null}
 
-                  {ridePricing?.pickupZone || ridePricing?.destinationZone ? (
-                    <Text style={styles.boltZones}>
-                      {ridePricing.pickupZone ? `Zone départ : ${ridePricing.pickupZone}` : 'Zone départ : —'}
-                      {'\n'}
-                      {ridePricing.destinationZone
-                        ? `Zone destination : ${ridePricing.destinationZone}`
-                        : 'Zone destination : —'}
-                    </Text>
-                  ) : null}
-
-                  {routeMetrics.distanceKm != null &&
-                  routeMetrics.durationMinutes != null ? (
-                    <Text style={styles.boltZones}>
-                      Env. {routeMetrics.distanceKm.toLocaleString('fr-FR')} km ·{' '}
-                      {routeMetrics.durationMinutes} min
-                    </Text>
-                  ) : null}
                 </View>
               </>
             ) : (
@@ -2058,7 +2124,7 @@ function ClientHomeMiddleContent(props: {
 
             {structuredDestination || ride != null ? (
               <View style={styles.orderBlock}>
-          {rideFetchLoading && !ride ? (
+          {showBoltTripSummary ? null : rideFetchLoading && !ride ? (
             <View style={styles.rideFetchLoadingRow}>
               <ActivityIndicator size="small" color="#0f766e" />
               <Text style={styles.rideFetchLoadingText}>
@@ -2066,10 +2132,41 @@ function ClientHomeMiddleContent(props: {
               </Text>
             </View>
           ) : null}
-          {rideFetchError ? (
+          {showBoltTripSummary ? null : rideFetchError ? (
             <Text style={styles.orderError}>{rideFetchError}</Text>
           ) : null}
-          {structuredDestination ? (
+
+          {/* ÉTAT RÉSUMÉ (Bolt): uniquement Commander (pas d’état ride / pas de texte) */}
+          {showBoltTripSummary && structuredDestination ? (
+            <Animated.View
+              style={{
+                transform: [{ scale: orderCta.scale }],
+              }}
+            >
+              <Pressable
+                style={({ pressed }) => [
+                  styles.orderButton,
+                  (!canOrder || orderLoading || hasOpenRide) &&
+                    styles.orderButtonDisabled,
+                  pressed &&
+                    canOrder &&
+                    !orderLoading &&
+                    !hasOpenRide &&
+                    styles.orderButtonPressed,
+                ]}
+                disabled={!canOrder || orderLoading || hasOpenRide}
+                onPressIn={orderCta.onPressIn}
+                onPressOut={orderCta.onPressOut}
+                onPress={() => void handleOrderPress()}
+              >
+                {orderLoading ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.orderButtonLabel}>Commander</Text>
+                )}
+              </Pressable>
+            </Animated.View>
+          ) : structuredDestination ? (
             <Animated.View
               style={{
                 transform: [{ scale: orderCta.scale }],
@@ -2105,7 +2202,8 @@ function ClientHomeMiddleContent(props: {
               connexion ou contactez le support.
             </Text>
           ) : null}
-          {!canOrder &&
+          {!showBoltTripSummary &&
+          !canOrder &&
           !orderLoading &&
           !hasOpenRide &&
           structuredDestination ? (
@@ -2128,7 +2226,8 @@ function ClientHomeMiddleContent(props: {
                             : 'Complétez les conditions pour commander.'}
             </Text>
           ) : null}
-          {ride ? (
+          {/* En mode résumé: on supprime les messages d’état ride (ils appartiennent aux étapes suivantes). */}
+          {!showBoltTripSummary && ride ? (
             <Text
               style={
                 ride.status === 'requested' ||
@@ -2157,8 +2256,10 @@ function ClientHomeMiddleContent(props: {
               <Text style={styles.orderHint}>Chargement du code de fin de course…</Text>
             )
           ) : null}
-          {driverHint ? <Text style={styles.orderHint}>{driverHint}</Text> : null}
-          {rideRealtimeError ? (
+          {!showBoltTripSummary && driverHint ? (
+            <Text style={styles.orderHint}>{driverHint}</Text>
+          ) : null}
+          {!showBoltTripSummary && rideRealtimeError ? (
             <Text style={styles.orderRealtimeWarning}>{rideRealtimeError}</Text>
           ) : null}
           {paymentConfirmPending && ride?.status === 'awaiting_payment' ? (
@@ -2506,6 +2607,77 @@ const styles = StyleSheet.create({
     padding: 16,
     marginTop: 6,
     marginBottom: 6,
+  },
+  boltTripRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 14,
+  },
+  boltTripColLeft: {
+    width: '40%',
+    alignItems: 'flex-start',
+  },
+  boltTripColRight: {
+    width: '40%',
+    alignItems: 'flex-end',
+  },
+  boltTripArrowCol: {
+    width: '20%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 18,
+  },
+  boltTripLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+  },
+  boltTripLabelRowRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 6,
+    justifyContent: 'flex-end',
+    alignSelf: 'flex-end',
+  },
+  boltTripLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#64748b',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    flexShrink: 1,
+  },
+  boltTripValuePrimary: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0f172a',
+    lineHeight: 18,
+  },
+  boltTripValueSecondary: {
+    marginTop: 4,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#64748b',
+    lineHeight: 18,
+  },
+  boltTripValueRight: {
+    textAlign: 'right',
+    alignSelf: 'flex-end',
+  },
+  boltTripDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+  },
+  boltTripDotPickup: {
+    backgroundColor: BRAND_PRIMARY,
+  },
+  boltTripDotDest: {
+    backgroundColor: '#ef4444',
   },
   boltPriceLabel: {
     fontSize: 12,
