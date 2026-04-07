@@ -1692,45 +1692,44 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
+  const mapElement = (
+    <ClientMapBlock
+      location={location}
+      variant="fullscreen"
+      pickup={
+        pickupForUi
+          ? {
+              latitude: pickupForUi.latitude,
+              longitude: pickupForUi.longitude,
+              label: pickupForUi.label,
+            }
+          : null
+      }
+      destination={destinationForUi}
+      routeMetrics={routeMetrics}
+      driverLat={ride?.driver_lat ?? null}
+      driverLng={ride?.driver_lng ?? null}
+    />
+  );
+
+  const showSearchingDriverView =
+    tab === 'home' &&
+    (uiRideStatus === 'searching_driver' || ride?.status === 'requested');
+
+  // IMPORTANT UX: searching_driver est un écran dédié, sans overlays ni édition.
+  if (showSearchingDriverView) {
+    return (
+      <SearchingDriverView
+        map={mapElement}
+        cancelling={cancelLoading}
+        onCancel={() => void handleCancelPress()}
+      />
+    );
+  }
+
   return (
     <View style={styles.boltRoot}>
-      {(() => {
-        const map = (
-          <ClientMapBlock
-            location={location}
-            variant="fullscreen"
-            pickup={
-              pickupForUi
-                ? {
-                    latitude: pickupForUi.latitude,
-                    longitude: pickupForUi.longitude,
-                    label: pickupForUi.label,
-                  }
-                : null
-            }
-            destination={destinationForUi}
-            routeMetrics={routeMetrics}
-            driverLat={ride?.driver_lat ?? null}
-            driverLng={ride?.driver_lng ?? null}
-          />
-        );
-
-        const showSearching =
-          tab === 'home' &&
-          (uiRideStatus === 'searching_driver' || ride?.status === 'requested');
-
-        if (!showSearching) {
-          return map;
-        }
-
-        return (
-          <SearchingDriverView
-            map={map}
-            cancelling={cancelLoading}
-            onCancel={() => void handleCancelPress()}
-          />
-        );
-      })()}
+      {mapElement}
 
       <LinearGradient
         pointerEvents="none"
