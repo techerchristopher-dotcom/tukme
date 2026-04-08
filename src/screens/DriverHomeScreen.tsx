@@ -151,6 +151,17 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
   }, [driverId]);
 
   useEffect(() => {
+    if (!__DEV__) return;
+    console.log('[driver-assigned] rendered', {
+      count: rides.length,
+      ids: rides.map((r) => r.id).slice(0, 8),
+      cancelledByClient: rides.filter((r) => r.status === 'cancelled_by_client')
+        .length,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- DEV-only diagnostic
+  }, [rides]);
+
+  useEffect(() => {
     void fetchMine();
   }, [fetchMine]);
 
@@ -503,6 +514,7 @@ function DriverRequestsBlock() {
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const openIdsRef = useRef<Set<string>>(new Set());
+  const lastRenderedIdsRef = useRef<string>('');
 
   const fetchOpen = useCallback(async () => {
     setListError(null);
@@ -530,11 +542,17 @@ function DriverRequestsBlock() {
     const removed = [...openIdsRef.current].filter((id) => !nextIds.has(id));
     openIdsRef.current = nextIds;
     setRides(next);
+    // BUG 2: l’erreur "Cette course n’est plus disponible." ne doit pas polluer une nouvelle liste valide.
+    // Dès qu’un refetch réussit et remplace la liste, on efface l’erreur d’action.
+    setActionError(null);
     if (__DEV__) {
+      const ids = next.map((r) => r.id).slice(0, 12);
       console.log('[driver-open] fetchOpen done', {
         after: next.length,
+        ids,
         removed: removed.length,
         removedIds: removed.slice(0, 5),
+        actionError: actionError ?? null,
       });
       if (removed.length > 0) {
         console.log(
@@ -544,11 +562,25 @@ function DriverRequestsBlock() {
       }
     }
     setLoading(false);
-  }, []);
+  }, [actionError]);
 
   useEffect(() => {
     void fetchOpen();
   }, [fetchOpen]);
+
+  useEffect(() => {
+    if (!__DEV__) return;
+    const renderedIds = rides.map((r) => r.id).join(',');
+    if (renderedIds === lastRenderedIdsRef.current) {
+      return;
+    }
+    lastRenderedIdsRef.current = renderedIds;
+    console.log('[driver-open] rendered ids', {
+      count: rides.length,
+      ids: rides.map((r) => r.id).slice(0, 12),
+      actionError: actionError ?? null,
+    });
+  }, [rides, actionError]);
 
   /**
    * Fallback minimal (critique): une ride `requested` peut devenir `cancelled_by_client`,
@@ -556,14 +588,22 @@ function DriverRequestsBlock() {
    * peut ne pas être livré au client chauffeur. Ce polling léger évite une liste stale.
    */
   useEffect(() => {
-    if (Platform.OS === 'web') {
-      return;
+    if (__DEV__) {
+      console.log('[driver-open] poll mounted');
     }
     const id = setInterval(() => {
+      if (__DEV__) {
+        console.log('[driver-open] poll tick');
+      }
       // Ne pas spammer si l’écran est en erreur réseau/rls.
       void fetchOpen();
-    }, 4000);
-    return () => clearInterval(id);
+    }, 2500);
+    return () => {
+      clearInterval(id);
+      if (__DEV__) {
+        console.log('[driver-open] poll cleared');
+      }
+    };
   }, [fetchOpen]);
 
   useEffect(() => {
@@ -645,12 +685,18 @@ function DriverRequestsBlock() {
     }
     setActionError(null);
     setAcceptingId(rideId);
+    if (__DEV__) {
+      console.log('[driver-open] accept press', { rideId });
+    }
     const { error } = await supabase.rpc('accept_ride_as_driver', {
       p_ride_id: rideId,
     });
     setAcceptingId(null);
     if (error) {
       const raw = error.message ?? '';
+      if (__DEV__) {
+        console.log('[driver-open] accept error', { rideId, raw });
+      }
       if (raw.includes('ACCEPT_RIDE_NOT_REQUESTED')) {
         setActionError('Cette course n’est plus disponible.');
       } else if (raw.includes('ACCEPT_RIDE_NOT_DRIVER')) {
@@ -662,6 +708,9 @@ function DriverRequestsBlock() {
       }
       void fetchOpen();
       return;
+    }
+    if (__DEV__) {
+      console.log('[driver-open] accept ok', { rideId });
     }
     void notifyRideEvent({ event: 'ride_accepted', rideId });
     void fetchOpen();
@@ -688,12 +737,13 @@ function DriverRequestsBlock() {
   }
 
   if (rides.length === 0) {
-    return (
-      <View style={styles.driverBlock}>
-        <Text style={styles.driverTitle}>Demandes ouvertes</Text>
-        <Text style={styles.driverHint}>Aucune course en attente pour le moment.</Text>
-      </View>
-    );
+    if (__DEV__ && (actionError || realtimeError)) {
+      console.log('[driver-open] render guard active', {
+        actionError: actionError ?? null,
+        realtimeError: realtimeError ?? null,
+      });
+    }
+    return null;
   }
 
   return (
