@@ -19,7 +19,6 @@
       [
         "@stripe/stripe-react-native",
         {
-          "merchantIdentifier": "merchant.com.tukme.app",
           "enableGooglePay": false
         }
       ]
