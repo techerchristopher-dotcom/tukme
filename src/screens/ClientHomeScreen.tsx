@@ -1850,6 +1850,86 @@ function ClientHomeMiddleContent(props: {
     tab === 'home' &&
     (uiRideStatus === 'searching_driver' || ride?.status === 'requested');
 
+  const showAwaitingPaymentView = tab === 'home' && ride?.status === 'awaiting_payment';
+
+  const awaitingPaymentBlock =
+    !showBoltTripSummary && ride?.status === 'awaiting_payment' ? (
+      <View style={styles.awaitingPaySheet}>
+        <View style={styles.awaitingPayDriverBlock}>
+          <Text style={styles.awaitingPayTitle}>Chauffeur trouvé</Text>
+          <Text style={styles.awaitingPaySubtitle}>
+            {ride.driver_id
+              ? 'Votre chauffeur a accepté votre course'
+              : 'Un chauffeur a accepté votre course'}
+          </Text>
+          {/* Véhicule optionnel : pas de données fiables pour l’instant → ne pas afficher. */}
+        </View>
+
+        <Text style={styles.awaitingPayExplain}>
+          Votre chauffeur attend votre paiement pour démarrer
+        </Text>
+
+        <Text style={styles.awaitingPayTimer}>
+          Réservation en attente • {paymentCountdownMmSs ?? '--:--'}
+        </Text>
+
+        {/* Pas de microcopy supplémentaire ici : le timer + le CTA suffisent. */}
+
+        {ride?.status === 'awaiting_payment' &&
+        (!ride.payment_expires_at || !paymentWindowExpired) ? (
+          Platform.OS === 'web' ? (
+            <Text style={styles.awaitingPayMuted}>
+              Le paiement sécurisé est disponible sur l’application mobile
+              (iOS/Android), pas dans le navigateur.
+            </Text>
+          ) : (
+            <PressableScale
+              style={[
+                styles.awaitingPayPrimaryBtn,
+                paymentSheetLoading && styles.awaitingPayPrimaryBtnDisabled,
+              ]}
+              pressedStyle={styles.awaitingPayPrimaryBtnPressed}
+              disabledStyle={styles.awaitingPayPrimaryBtnDisabled}
+              onPress={() => void handlePayPress()}
+              disabled={paymentSheetLoading}
+            >
+              {paymentSheetLoading ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.awaitingPayPrimaryBtnText}>
+                  Payer{' '}
+                  {ride.estimated_price_eur != null &&
+                  Number.isFinite(ride.estimated_price_eur)
+                    ? `${ride.estimated_price_eur.toFixed(2)} €`
+                    : '—'}
+                </Text>
+              )}
+            </PressableScale>
+          )
+        ) : null}
+
+        {paymentError ? <Text style={styles.orderError}>{paymentError}</Text> : null}
+
+        <Pressable
+          style={({ pressed }) => [
+            styles.awaitingPayCancelBtn,
+            cancelLoading && styles.orderButtonDisabled,
+            pressed && !cancelLoading && styles.awaitingPayCancelBtnPressed,
+          ]}
+          disabled={cancelLoading}
+          onPress={() => void handleCancelPress()}
+        >
+          {cancelLoading ? (
+            <ActivityIndicator color="#0f766e" />
+          ) : (
+            <Text style={styles.awaitingPayCancelText}>Annuler la course</Text>
+          )}
+        </Pressable>
+
+        {cancelError ? <Text style={styles.orderError}>{cancelError}</Text> : null}
+      </View>
+    ) : null;
+
   // IMPORTANT UX: searching_driver est un écran dédié, sans overlays ni édition.
   if (showSearchingDriverView) {
     return (
@@ -1877,6 +1957,22 @@ function ClientHomeMiddleContent(props: {
         pickupLabel={structuredPickup?.label ?? null}
         destinationLabel={structuredDestination?.label ?? null}
       />
+    );
+  }
+
+  // IMPORTANT UX: awaiting_payment est un écran dédié : map + paiement uniquement.
+  if (showAwaitingPaymentView) {
+    return (
+      <View style={styles.boltRoot}>
+        {mapElement}
+        <SafeAreaView style={styles.awaitingPaySafeBottom} pointerEvents="box-none">
+          <View style={styles.awaitingPayBottomSheet}>
+            <View style={styles.sheetGrabber} />
+            {awaitingPaymentBlock}
+          </View>
+        </SafeAreaView>
+        <StatusBar barStyle="dark-content" />
+      </View>
     );
   }
 
@@ -2457,84 +2553,7 @@ function ClientHomeMiddleContent(props: {
           ) : null}
 
           {/* ÉCRAN "Chauffeur trouvé → Paiement" (awaiting_payment) */}
-          {!showBoltTripSummary && ride?.status === 'awaiting_payment' ? (
-            <View style={styles.awaitingPaySheet}>
-              <View style={styles.awaitingPayDriverBlock}>
-                <Text style={styles.awaitingPayTitle}>Chauffeur trouvé</Text>
-                <Text style={styles.awaitingPaySubtitle}>
-                  {ride.driver_id
-                    ? 'Votre chauffeur a accepté votre course'
-                    : 'Un chauffeur a accepté votre course'}
-                </Text>
-                {/* Véhicule optionnel : pas de données fiables pour l’instant → ne pas afficher. */}
-              </View>
-
-              <Text style={styles.awaitingPayExplain}>
-                Votre chauffeur attend votre paiement pour démarrer
-              </Text>
-
-              <Text style={styles.awaitingPayTimer}>
-                Réservation en attente • {paymentCountdownMmSs ?? '--:--'}
-              </Text>
-
-              {/* Pas de microcopy supplémentaire ici : le timer + le CTA suffisent. */}
-
-              {ride?.status === 'awaiting_payment' &&
-              (!ride.payment_expires_at || !paymentWindowExpired) ? (
-                Platform.OS === 'web' ? (
-                  <Text style={styles.awaitingPayMuted}>
-                    Le paiement sécurisé est disponible sur l’application mobile
-                    (iOS/Android), pas dans le navigateur.
-                  </Text>
-                ) : (
-                  <PressableScale
-                    style={[
-                      styles.awaitingPayPrimaryBtn,
-                      paymentSheetLoading && styles.awaitingPayPrimaryBtnDisabled,
-                    ]}
-                    pressedStyle={styles.awaitingPayPrimaryBtnPressed}
-                    disabledStyle={styles.awaitingPayPrimaryBtnDisabled}
-                    onPress={() => void handlePayPress()}
-                    disabled={paymentSheetLoading}
-                  >
-                    {paymentSheetLoading ? (
-                      <ActivityIndicator color="#fff" />
-                    ) : (
-                      <Text style={styles.awaitingPayPrimaryBtnText}>
-                        Payer{' '}
-                        {ride.estimated_price_eur != null &&
-                        Number.isFinite(ride.estimated_price_eur)
-                          ? `${ride.estimated_price_eur.toFixed(2)} €`
-                          : '—'}
-                      </Text>
-                    )}
-                  </PressableScale>
-                )
-              ) : null}
-
-              {paymentError ? (
-                <Text style={styles.orderError}>{paymentError}</Text>
-              ) : null}
-
-              <Pressable
-                style={({ pressed }) => [
-                  styles.awaitingPayCancelBtn,
-                  cancelLoading && styles.orderButtonDisabled,
-                  pressed && !cancelLoading && styles.awaitingPayCancelBtnPressed,
-                ]}
-                disabled={cancelLoading}
-                onPress={() => void handleCancelPress()}
-              >
-                {cancelLoading ? (
-                  <ActivityIndicator color="#0f766e" />
-                ) : (
-                  <Text style={styles.awaitingPayCancelText}>Annuler la course</Text>
-                )}
-              </Pressable>
-
-              {cancelError ? <Text style={styles.orderError}>{cancelError}</Text> : null}
-            </View>
-          ) : null}
+          {awaitingPaymentBlock}
           {!destinationForUi && ride != null ? (
             <Text style={styles.orderHint}>
               Une course est en cours sans destination affichable. Vérifiez la
@@ -2858,6 +2877,27 @@ const styles = StyleSheet.create({
     paddingTop: 10,
     paddingHorizontal: 20,
     paddingBottom: 14,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: -4 },
+    elevation: 8,
+  },
+  awaitingPaySafeBottom: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  awaitingPayBottomSheet: {
+    width: '100%',
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingTop: 10,
+    paddingHorizontal: 20,
+    paddingBottom: 14,
+    maxHeight: '55%',
     shadowColor: '#000',
     shadowOpacity: 0.1,
     shadowRadius: 12,
