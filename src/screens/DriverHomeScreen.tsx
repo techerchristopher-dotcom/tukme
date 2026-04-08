@@ -1,7 +1,9 @@
 import type { Session } from '@supabase/supabase-js';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AppState,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -80,6 +82,10 @@ function driverAssignmentStatusMessage(status: string): string {
       return 'Course en cours';
     case 'completed':
       return 'Course terminée';
+    case 'cancelled_by_client':
+      return 'Annulée par le client';
+    case 'cancelled_by_driver':
+      return 'Annulée par le chauffeur';
     default:
       return `Statut : ${status}`;
   }
@@ -116,6 +122,8 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
         'expired',
         'in_progress',
         'completed',
+        // UX: garder visible si le client annule avant paiement.
+        'cancelled_by_client',
       ])
       .order('updated_at', { ascending: false });
 
@@ -128,11 +136,37 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
 
     const rows = (data ?? []) as AssignedRideRow[];
     setRides(rows.filter((r) => r.id));
+    if (__DEV__) {
+      const cancelledByClient = rows.filter(
+        (r) => r.status === 'cancelled_by_client'
+      ).length;
+      if (cancelledByClient > 0) {
+        console.log(
+          '[driver-ux] cancelled_by_client visible',
+          cancelledByClient
+        );
+      }
+    }
     setLoading(false);
   }, [driverId]);
 
   useEffect(() => {
     void fetchMine();
+  }, [fetchMine]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') {
+        return;
+      }
+      if (__DEV__) {
+        console.log('[driver-realtime] appstate active -> refetch', 'assigned');
+      }
+      void fetchMine();
+    });
+    return () => {
+      sub.remove();
+    };
   }, [fetchMine]);
 
   const rideForTracking = useMemo(() => {
@@ -149,54 +183,63 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
   });
 
   useEffect(() => {
-    const channel = supabase
-      .channel('driver-rides-assigned')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'rides' },
-        () => {
-          void fetchMine();
-        }
-      )
-      .subscribe((status, err) => {
-        if (status === 'SUBSCRIBED') {
-          setRealtimeError(null);
-          return;
-        }
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          const detail = err?.message?.trim();
-          setRealtimeError(
-            detail ||
-              (status === 'TIMED_OUT'
-                ? 'Connexion temps réel indisponible (délai dépassé).'
-                : 'Connexion temps réel indisponible. Vérifiez la publication Realtime et votre session.')
-          );
-          // Fallback minimal: refetch immédiat pour éviter un écran “mort”.
-          void fetchMine();
-        }
-      });
-
-    return () => {
-      void supabase.removeChannel(channel);
-    };
-  }, [fetchMine]);
-
-  // Synchronise l’auth Realtime avant subscription (pattern utilisé côté client).
-  useEffect(() => {
     let cancelled = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
     void (async () => {
       const ok = await syncRealtimeAuth();
       if (cancelled) return;
+
+      if (__DEV__) {
+        console.log('[driver-realtime] auth', 'assigned', ok ? 'ok' : 'missing');
+      }
+
       if (!ok) {
         setRealtimeError(
           'Connexion temps réel indisponible : session introuvable. Reconnectez-vous.'
         );
+        return;
       }
+
+      channel = supabase
+        .channel('driver-rides-assigned')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'rides' },
+          () => {
+            void fetchMine();
+          }
+        )
+        .subscribe((status, err) => {
+          if (__DEV__) {
+            console.log('[driver-realtime] subscribe', 'assigned', status);
+          }
+          if (status === 'SUBSCRIBED') {
+            setRealtimeError(null);
+            return;
+          }
+          if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            const detail = err?.message?.trim();
+            setRealtimeError(
+              detail ||
+                (status === 'TIMED_OUT'
+                  ? 'Connexion temps réel indisponible (délai dépassé).'
+                  : 'Connexion temps réel indisponible. Vérifiez la publication Realtime et votre session.')
+            );
+            // Fallback minimal: refetch immédiat pour éviter un écran “mort”.
+            void fetchMine();
+          }
+        });
     })();
+
     return () => {
       cancelled = true;
+      if (channel) {
+        void supabase.removeChannel(channel);
+        channel = null;
+      }
     };
-  }, [driverId]);
+  }, [fetchMine]);
 
   async function handlePostPaidStep(
     rideId: string,
@@ -316,7 +359,13 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
         <Text style={styles.driverError}>{actionError}</Text>
       ) : null}
       {rides.map((r) => (
-        <View key={r.id} style={styles.rideCard}>
+        <View
+          key={r.id}
+          style={[
+            styles.rideCard,
+            r.status === 'cancelled_by_client' && styles.rideCardCancelled,
+          ]}
+        >
           <Text style={styles.rideDest} numberOfLines={2}>
             {r.destination_label || 'Destination'}
           </Text>
@@ -453,9 +502,14 @@ function DriverRequestsBlock() {
   const [realtimeError, setRealtimeError] = useState<string | null>(null);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const openIdsRef = useRef<Set<string>>(new Set());
 
   const fetchOpen = useCallback(async () => {
     setListError(null);
+    const before = openIdsRef.current.size;
+    if (__DEV__) {
+      console.log('[driver-open] fetchOpen start', { before });
+    }
     const { data, error } = await supabase
       .from('rides')
       .select(SELECT_OPEN)
@@ -470,7 +524,25 @@ function DriverRequestsBlock() {
     }
 
     const rows = (data ?? []) as OpenRideRow[];
-    setRides(rows.filter((r) => r.id));
+    const next = rows.filter((r) => r.id);
+    const nextIds = new Set(next.map((r) => r.id));
+    // Détecte les rides retirées de la liste (ex: annulées par le client).
+    const removed = [...openIdsRef.current].filter((id) => !nextIds.has(id));
+    openIdsRef.current = nextIds;
+    setRides(next);
+    if (__DEV__) {
+      console.log('[driver-open] fetchOpen done', {
+        after: next.length,
+        removed: removed.length,
+        removedIds: removed.slice(0, 5),
+      });
+      if (removed.length > 0) {
+        console.log(
+          '[driver-open] rides removed (likely cancel/accept by others)',
+          removed.length
+        );
+      }
+    }
     setLoading(false);
   }, []);
 
@@ -478,53 +550,94 @@ function DriverRequestsBlock() {
     void fetchOpen();
   }, [fetchOpen]);
 
+  /**
+   * Fallback minimal (critique): une ride `requested` peut devenir `cancelled_by_client`,
+   * et sous RLS elle n’est alors plus visible aux chauffeurs → l’UPDATE Realtime
+   * peut ne pas être livré au client chauffeur. Ce polling léger évite une liste stale.
+   */
   useEffect(() => {
-    const channel = supabase
-      .channel('driver-rides-open')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'rides' },
-        () => {
-          void fetchOpen();
-        }
-      )
-      .subscribe((status, err) => {
-        if (status === 'SUBSCRIBED') {
-          setRealtimeError(null);
-          return;
-        }
-        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-          const detail = err?.message?.trim();
-          setRealtimeError(
-            detail ||
-              (status === 'TIMED_OUT'
-                ? 'Connexion temps réel indisponible (délai dépassé).'
-                : 'Connexion temps réel indisponible. Vérifiez la publication Realtime et votre session.')
-          );
-          void fetchOpen();
-        }
-      });
+    if (Platform.OS === 'web') {
+      return;
+    }
+    const id = setInterval(() => {
+      // Ne pas spammer si l’écran est en erreur réseau/rls.
+      void fetchOpen();
+    }, 4000);
+    return () => clearInterval(id);
+  }, [fetchOpen]);
 
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') {
+        return;
+      }
+      if (__DEV__) {
+        console.log('[driver-realtime] appstate active -> refetch', 'open');
+      }
+      void fetchOpen();
+    });
     return () => {
-      void supabase.removeChannel(channel);
+      sub.remove();
     };
   }, [fetchOpen]);
 
   useEffect(() => {
     let cancelled = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
     void (async () => {
       const ok = await syncRealtimeAuth();
       if (cancelled) return;
+
+      if (__DEV__) {
+        console.log('[driver-realtime] auth', 'open', ok ? 'ok' : 'missing');
+      }
+
       if (!ok) {
         setRealtimeError(
           'Connexion temps réel indisponible : session introuvable. Reconnectez-vous.'
         );
+        return;
       }
+
+      channel = supabase
+        .channel('driver-rides-open')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'rides' },
+          () => {
+            void fetchOpen();
+          }
+        )
+        .subscribe((status, err) => {
+          if (__DEV__) {
+            console.log('[driver-realtime] subscribe', 'open', status);
+          }
+          if (status === 'SUBSCRIBED') {
+            setRealtimeError(null);
+            return;
+          }
+          if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+            const detail = err?.message?.trim();
+            setRealtimeError(
+              detail ||
+                (status === 'TIMED_OUT'
+                  ? 'Connexion temps réel indisponible (délai dépassé).'
+                  : 'Connexion temps réel indisponible. Vérifiez la publication Realtime et votre session.')
+            );
+            void fetchOpen();
+          }
+        });
     })();
+
     return () => {
       cancelled = true;
+      if (channel) {
+        void supabase.removeChannel(channel);
+        channel = null;
+      }
     };
-  }, []);
+  }, [fetchOpen]);
 
   async function handleAccept(rideId: string) {
     if (acceptingId) {
@@ -695,6 +808,9 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderTopWidth: 1,
     borderTopColor: '#e2e8f0',
+  },
+  rideCardCancelled: {
+    opacity: 0.62,
   },
   rideDest: {
     fontSize: 16,
