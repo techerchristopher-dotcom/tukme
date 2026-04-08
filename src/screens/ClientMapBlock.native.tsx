@@ -74,8 +74,19 @@ export function ClientMapBlock(props: {
     ) {
       return;
     }
+    const hasDriver =
+      typeof driverLat === 'number' &&
+      Number.isFinite(driverLat) &&
+      typeof driverLng === 'number' &&
+      Number.isFinite(driverLng);
     const id = requestAnimationFrame(() => {
-      mapRef.current?.fitToCoordinates(routeMetrics.polylineCoordinates!, {
+      const coords = hasDriver
+        ? [
+            ...routeMetrics.polylineCoordinates!,
+            { latitude: driverLat as number, longitude: driverLng as number },
+          ]
+        : routeMetrics.polylineCoordinates!;
+      mapRef.current?.fitToCoordinates(coords, {
         edgePadding:
           variant === 'fullscreen'
             ? { top: 120, right: 46, bottom: 320, left: 46 }
@@ -84,7 +95,15 @@ export function ClientMapBlock(props: {
       });
     });
     return () => cancelAnimationFrame(id);
-  }, [location.phase, pickup, destination, routeMetrics.polylineCoordinates, variant]);
+  }, [
+    location.phase,
+    pickup,
+    destination,
+    routeMetrics.polylineCoordinates,
+    variant,
+    driverLat,
+    driverLng,
+  ]);
 
   if (!pickup && location.phase === 'loading') {
     return (

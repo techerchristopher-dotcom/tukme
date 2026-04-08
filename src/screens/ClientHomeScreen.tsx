@@ -2418,7 +2418,7 @@ function ClientHomeMiddleContent(props: {
           ) : null}
 
           {/* ÉTAT RÉSUMÉ (Bolt): uniquement Commander (pas d’état ride / pas de texte) */}
-          {structuredDestination ? (
+          {structuredDestination && !ride ? (
             <PressableScale
               style={[
                 styles.orderButtonPremium,
@@ -2456,36 +2456,83 @@ function ClientHomeMiddleContent(props: {
             </View>
           ) : null}
 
+          {/* ÉCRAN "Chauffeur trouvé → Paiement" (awaiting_payment) */}
           {!showBoltTripSummary && ride?.status === 'awaiting_payment' ? (
-            <View style={styles.driverArrivingCard}>
-              <View style={styles.driverArrivingTop}>
-                <Ionicons name="car" size={18} color={BRAND_PRIMARY} />
-                <Text style={styles.driverArrivingTitle}>Chauffeur trouvé</Text>
+            <View style={styles.awaitingPaySheet}>
+              <View style={styles.awaitingPayDriverBlock}>
+                <Text style={styles.awaitingPayTitle}>Chauffeur trouvé</Text>
+                <Text style={styles.awaitingPaySubtitle}>
+                  {ride.driver_id
+                    ? 'Votre chauffeur a accepté votre course'
+                    : 'Un chauffeur a accepté votre course'}
+                </Text>
+                {/* Véhicule optionnel : pas de données fiables pour l’instant → ne pas afficher. */}
               </View>
-              <Text style={styles.driverArrivingMeta}>
-                {ride.driver_id ? 'Chauffeur assigné' : 'Chauffeur en cours…'} · ETA : —
+
+              <Text style={styles.awaitingPayExplain}>
+                Votre chauffeur attend votre paiement pour démarrer
               </Text>
-              <Text style={styles.passengersReadOnly}>
-                Passagers : {ride.passenger_count}
+
+              <Text style={styles.awaitingPayTimer}>
+                Réservation en attente • {paymentCountdownMmSs ?? '--:--'}
               </Text>
-              <View style={styles.driverArrivingActions}>
-                <PressableScale
-                  style={styles.driverActionBtn}
-                  pressedStyle={styles.driverActionBtnPressed}
-                  disabled
-                >
-                  <Ionicons name="call" size={18} color="#94a3b8" />
-                  <Text style={styles.driverActionTextDisabled}>Appeler</Text>
-                </PressableScale>
-                <PressableScale
-                  style={styles.driverActionBtn}
-                  pressedStyle={styles.driverActionBtnPressed}
-                  disabled
-                >
-                  <Ionicons name="chatbubble" size={18} color="#94a3b8" />
-                  <Text style={styles.driverActionTextDisabled}>Message</Text>
-                </PressableScale>
-              </View>
+
+              {/* Pas de microcopy supplémentaire ici : le timer + le CTA suffisent. */}
+
+              {ride?.status === 'awaiting_payment' &&
+              (!ride.payment_expires_at || !paymentWindowExpired) ? (
+                Platform.OS === 'web' ? (
+                  <Text style={styles.awaitingPayMuted}>
+                    Le paiement sécurisé est disponible sur l’application mobile
+                    (iOS/Android), pas dans le navigateur.
+                  </Text>
+                ) : (
+                  <PressableScale
+                    style={[
+                      styles.awaitingPayPrimaryBtn,
+                      paymentSheetLoading && styles.awaitingPayPrimaryBtnDisabled,
+                    ]}
+                    pressedStyle={styles.awaitingPayPrimaryBtnPressed}
+                    disabledStyle={styles.awaitingPayPrimaryBtnDisabled}
+                    onPress={() => void handlePayPress()}
+                    disabled={paymentSheetLoading}
+                  >
+                    {paymentSheetLoading ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.awaitingPayPrimaryBtnText}>
+                        Payer{' '}
+                        {ride.estimated_price_eur != null &&
+                        Number.isFinite(ride.estimated_price_eur)
+                          ? `${ride.estimated_price_eur.toFixed(2)} €`
+                          : '—'}
+                      </Text>
+                    )}
+                  </PressableScale>
+                )
+              ) : null}
+
+              {paymentError ? (
+                <Text style={styles.orderError}>{paymentError}</Text>
+              ) : null}
+
+              <Pressable
+                style={({ pressed }) => [
+                  styles.awaitingPayCancelBtn,
+                  cancelLoading && styles.orderButtonDisabled,
+                  pressed && !cancelLoading && styles.awaitingPayCancelBtnPressed,
+                ]}
+                disabled={cancelLoading}
+                onPress={() => void handleCancelPress()}
+              >
+                {cancelLoading ? (
+                  <ActivityIndicator color="#0f766e" />
+                ) : (
+                  <Text style={styles.awaitingPayCancelText}>Annuler la course</Text>
+                )}
+              </Pressable>
+
+              {cancelError ? <Text style={styles.orderError}>{cancelError}</Text> : null}
             </View>
           ) : null}
           {!destinationForUi && ride != null ? (
@@ -2519,11 +2566,10 @@ function ClientHomeMiddleContent(props: {
             </Text>
           ) : null}
           {/* En mode résumé: on supprime les messages d’état ride (ils appartiennent aux étapes suivantes). */}
-          {!showBoltTripSummary && ride ? (
+          {!showBoltTripSummary && ride && ride.status !== 'awaiting_payment' ? (
             <Text
               style={
                 ride.status === 'requested' ||
-                ride.status === 'awaiting_payment' ||
                 ride.status === 'paid' ||
                 ride.status === 'en_route' ||
                 ride.status === 'arrived' ||
@@ -2564,55 +2610,7 @@ function ClientHomeMiddleContent(props: {
           {!showBoltTripSummary && rideRealtimeError ? (
             <Text style={styles.orderRealtimeWarning}>{rideRealtimeError}</Text>
           ) : null}
-          {paymentConfirmPending && ride?.status === 'awaiting_payment' ? (
-            <Text style={styles.orderHint}>
-              Validation du paiement en cours…
-            </Text>
-          ) : null}
-          {ride?.status === 'awaiting_payment' && ride.payment_expires_at ? (
-            <Text style={styles.orderPaymentTimer}>
-              {paymentWindowExpired
-                ? 'Délai de paiement dépassé — mise à jour…'
-                : `Paiement requis — expire dans ${paymentCountdownMmSs ?? '--:--'}`}
-            </Text>
-          ) : null}
-          {ride?.status === 'awaiting_payment' &&
-          (!ride.payment_expires_at || !paymentWindowExpired) ? (
-            Platform.OS === 'web' ? (
-              <Text style={styles.orderHint}>
-                Le paiement sécurisé est disponible sur l’application mobile
-                (iOS/Android), pas dans le navigateur.
-              </Text>
-            ) : (
-              <PressableScale
-                style={[
-                  styles.orderPayButton,
-                  paymentSheetLoading && styles.orderButtonDisabled,
-                ]}
-                pressedStyle={styles.orderPayButtonPressed}
-                disabledStyle={styles.orderButtonDisabled}
-                onPress={() => void handlePayPress()}
-                disabled={paymentSheetLoading}
-              >
-                  {paymentSheetLoading ? (
-                    <ActivityIndicator color="#fff" />
-                  ) : (
-                    <Text style={styles.orderPayButtonLabel}>
-                      Payer
-                      {ride.estimated_price_eur != null &&
-                      Number.isFinite(ride.estimated_price_eur)
-                        ? ` (${ride.estimated_price_eur.toFixed(2)} €)`
-                        : ''}
-                    </Text>
-                  )}
-              </PressableScale>
-            )
-          ) : null}
-          {paymentError ? (
-            <Text style={styles.orderError}>{paymentError}</Text>
-          ) : null}
-          {ride?.status === 'requested' ||
-          ride?.status === 'awaiting_payment' ? (
+          {ride?.status === 'requested' ? (
             <Pressable
               style={({ pressed }) => [
                 styles.orderCancelButton,
@@ -2628,9 +2626,6 @@ function ClientHomeMiddleContent(props: {
                 <Text style={styles.orderCancelLabel}>Annuler la course</Text>
               )}
             </Pressable>
-          ) : null}
-          {cancelError ? (
-            <Text style={styles.orderError}>{cancelError}</Text>
           ) : null}
           {orderError ? (
             <Text style={styles.orderError}>{orderError}</Text>
@@ -3843,6 +3838,91 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '700',
     color: '#fff',
+  },
+  awaitingPaySheet: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 18,
+    backgroundColor: '#fff',
+    padding: 16,
+  },
+  awaitingPayDriverBlock: {
+    marginBottom: 12,
+  },
+  awaitingPayTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#0f172a',
+    letterSpacing: -0.2,
+  },
+  awaitingPaySubtitle: {
+    marginTop: 6,
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#334155',
+    lineHeight: 20,
+  },
+  awaitingPayExplain: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0f172a',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  awaitingPayTimer: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0f172a',
+    marginBottom: 12,
+  },
+  awaitingPayMuted: {
+    marginTop: 6,
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#64748b',
+    lineHeight: 18,
+  },
+  awaitingPayPrimaryBtn: {
+    marginTop: 14,
+    width: '100%',
+    height: 56,
+    borderRadius: 999,
+    backgroundColor: BRAND_PRIMARY,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 6,
+  },
+  awaitingPayPrimaryBtnDisabled: {
+    backgroundColor: '#94a3b8',
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  awaitingPayPrimaryBtnPressed: {
+    opacity: 0.92,
+  },
+  awaitingPayPrimaryBtnText: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: '#fff',
+  },
+  awaitingPayCancelBtn: {
+    marginTop: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  awaitingPayCancelBtnPressed: {
+    opacity: 0.7,
+  },
+  awaitingPayCancelText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#0f766e',
   },
   orderPaymentTimer: {
     marginTop: 8,

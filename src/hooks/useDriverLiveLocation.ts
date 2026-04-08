@@ -37,6 +37,9 @@ async function rpcUpdateDriverLocation(
   lat: number,
   lng: number
 ): Promise<void> {
+  if (__DEV__) {
+    console.log(`${LOG} send`, { rideId, lat, lng });
+  }
   const { error } = await supabase.rpc('update_driver_location', {
     p_ride_id: rideId,
     p_lat: lat,
