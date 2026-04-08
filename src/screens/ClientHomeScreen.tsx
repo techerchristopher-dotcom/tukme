@@ -1971,6 +1971,63 @@ function ClientHomeMiddleContent(props: {
             {awaitingPaymentBlock}
           </View>
         </SafeAreaView>
+        <SafeAreaView style={styles.bottomNavSafe} pointerEvents="box-none">
+          <View style={styles.bottomNav}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'home' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('home')}
+            >
+              <Ionicons
+                name={tab === 'home' ? 'home' : 'home-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'home' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'home' ? styles.navTextActive : styles.navText}>
+                Accueil
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'trips' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('trips')}
+            >
+              <Ionicons
+                name={tab === 'trips' ? 'time' : 'time-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'trips' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'trips' ? styles.navTextActive : styles.navText}>
+                Trajets
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'account' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('account')}
+            >
+              <Ionicons
+                name={tab === 'account' ? 'person' : 'person-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'account' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text
+                style={tab === 'account' ? styles.navTextActive : styles.navText}
+              >
+                Compte
+              </Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
         <StatusBar barStyle="dark-content" />
       </View>
     );
@@ -2887,7 +2944,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 0,
+    bottom: 78,
   },
   awaitingPayBottomSheet: {
     width: '100%',
@@ -2896,7 +2953,8 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 24,
     paddingTop: 10,
     paddingHorizontal: 20,
-    paddingBottom: 14,
+    // Espace de sécurité pour éviter que le CTA "Annuler" soit coupé par la navbar.
+    paddingBottom: 100,
     maxHeight: '55%',
     shadowColor: '#000',
     shadowOpacity: 0.1,
@@ -3881,10 +3939,10 @@ const styles = StyleSheet.create({
   },
   awaitingPaySheet: {
     marginTop: 12,
+    backgroundColor: '#fff',
+    borderRadius: 18,
     borderWidth: 1,
     borderColor: '#e5e7eb',
-    borderRadius: 18,
-    backgroundColor: '#fff',
     padding: 16,
   },
   awaitingPayDriverBlock: {
@@ -3915,6 +3973,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#0f172a',
     marginBottom: 12,
+    fontVariant: ['tabular-nums'],
   },
   awaitingPayMuted: {
     marginTop: 6,
@@ -3952,17 +4011,23 @@ const styles = StyleSheet.create({
   },
   awaitingPayCancelBtn: {
     marginTop: 12,
-    paddingVertical: 10,
+    height: 52,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: BRAND_PRIMARY,
+    backgroundColor: '#fff',
+    paddingVertical: 0,
     alignItems: 'center',
     justifyContent: 'center',
   },
   awaitingPayCancelBtnPressed: {
-    opacity: 0.7,
+    opacity: 0.88,
+    backgroundColor: '#f0fdfa',
   },
   awaitingPayCancelText: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#0f766e',
+    fontSize: 16,
+    fontWeight: '800',
+    color: BRAND_PRIMARY,
   },
   orderPaymentTimer: {
     marginTop: 8,

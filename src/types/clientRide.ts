@@ -19,6 +19,14 @@ export type ClientRideSnapshot = {
   id: string;
   status: ClientRideStatus;
   driver_id: string | null;
+  /** Snapshot identité chauffeur (pour UI client). */
+  driver_display_name: string | null;
+  /** Snapshot avatar chauffeur (Storage path) (pour UI client). */
+  driver_avatar_path: string | null;
+  /** Snapshot type véhicule (pour UI client). */
+  vehicle_type: string | null;
+  /** Snapshot plaque véhicule (pour UI client). */
+  vehicle_plate: string | null;
   updated_at: string;
   /** Position chauffeur (nullable tant que non envoyée). */
   driver_lat: number | null;

@@ -6,7 +6,7 @@ import type { ClientRideSnapshot, ClientRideStatus } from '../types/clientRide';
 const LOG = '[ride-realtime]';
 
 const RIDE_SELECT_COLUMNS =
-  'id, status, driver_id, updated_at, driver_lat, driver_lng, driver_location_updated_at, pickup_label, destination_label, destination_lat, destination_lng, destination_place_id, passenger_count, estimated_price_eur, payment_expires_at, ride_completed_at';
+  'id, status, driver_id, updated_at, driver_lat, driver_lng, driver_location_updated_at, driver_display_name, driver_avatar_path, vehicle_type, vehicle_plate, pickup_label, destination_label, destination_lat, destination_lng, destination_place_id, passenger_count, estimated_price_eur, payment_expires_at, ride_completed_at';
 
 const OPEN_STATUSES: ClientRideStatus[] = [
   'requested',
@@ -120,6 +120,42 @@ function buildRideSnapshot(
     driver_location_updated_at = prev?.driver_location_updated_at ?? null;
   }
 
+  const driver_display_name =
+    row.driver_display_name === undefined
+      ? (prev?.driver_display_name ?? null)
+      : typeof row.driver_display_name === 'string'
+        ? row.driver_display_name
+        : row.driver_display_name === null
+          ? null
+          : prev?.driver_display_name ?? null;
+
+  const driver_avatar_path =
+    row.driver_avatar_path === undefined
+      ? (prev?.driver_avatar_path ?? null)
+      : typeof row.driver_avatar_path === 'string'
+        ? row.driver_avatar_path
+        : row.driver_avatar_path === null
+          ? null
+          : prev?.driver_avatar_path ?? null;
+
+  const vehicle_type =
+    row.vehicle_type === undefined
+      ? (prev?.vehicle_type ?? null)
+      : typeof row.vehicle_type === 'string'
+        ? row.vehicle_type
+        : row.vehicle_type === null
+          ? null
+          : prev?.vehicle_type ?? null;
+
+  const vehicle_plate =
+    row.vehicle_plate === undefined
+      ? (prev?.vehicle_plate ?? null)
+      : typeof row.vehicle_plate === 'string'
+        ? row.vehicle_plate
+        : row.vehicle_plate === null
+          ? null
+          : prev?.vehicle_plate ?? null;
+
   const destLabel =
     typeof row.destination_label === 'string'
       ? row.destination_label
@@ -194,6 +230,10 @@ function buildRideSnapshot(
     driver_lat,
     driver_lng,
     driver_location_updated_at,
+    driver_display_name,
+    driver_avatar_path,
+    vehicle_type,
+    vehicle_plate,
     pickup_label,
     destination_label: destLabel,
     destination_lat: destLat,
