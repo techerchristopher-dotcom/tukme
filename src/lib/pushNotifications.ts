@@ -1,10 +1,12 @@
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
+import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 
 import { supabase } from './supabase';
 
 const LOG = '[push]';
+const NOTIF = '[notif]';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -22,6 +24,55 @@ function getExpoProjectId(): string | null {
   const fromEas = anyConst.easConfig?.projectId;
   const fromExtra = anyConst.expoConfig?.extra?.eas?.projectId;
   return (fromEas ?? fromExtra ?? null) ? String(fromEas ?? fromExtra) : null;
+}
+
+/**
+ * Récupère le token Expo Push au lancement (logs uniquement, pas de backend).
+ * À utiliser sur un dev build / device réel ; les simulateurs sont ignorés.
+ */
+export async function registerForPushNotificationsAsync(): Promise<string | null> {
+  if (Platform.OS === 'web') {
+    console.log(`${NOTIF} ignoré (web)`);
+    return null;
+  }
+
+  if (!Device.isDevice) {
+    console.log(`${NOTIF} ignoré (pas un appareil physique)`);
+    return null;
+  }
+
+  try {
+    const { status } = await Notifications.requestPermissionsAsync();
+    if (status !== 'granted') {
+      console.log(`${NOTIF} permission refusée`);
+      return null;
+    }
+
+    console.log(`${NOTIF} permission accordée`);
+
+    const projectId = getExpoProjectId();
+    if (!projectId) {
+      console.warn(
+        `${NOTIF} projectId EAS absent — ajoutez extra.eas.projectId (ou eas.json) pour un token fiable`
+      );
+    }
+
+    const tokenRes = projectId
+      ? await Notifications.getExpoPushTokenAsync({ projectId })
+      : await Notifications.getExpoPushTokenAsync();
+
+    const token = tokenRes.data?.trim() ?? '';
+    if (!token) {
+      console.warn(`${NOTIF} token vide`);
+      return null;
+    }
+
+    console.log(`${NOTIF} EXPO TOKEN:`, token);
+    return token;
+  } catch (err) {
+    console.warn(`${NOTIF} erreur`, err);
+    return null;
+  }
 }
 
 export async function registerForPushNotificationsIfPossible(userId: string): Promise<{

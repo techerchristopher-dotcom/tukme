@@ -10,6 +10,7 @@ import {
 import { useAuthSession } from './src/hooks/useAuthSession';
 import { useProfile } from './src/hooks/useProfile';
 import {
+  registerForPushNotificationsAsync,
   registerForPushNotificationsIfPossible,
   wirePushListeners,
 } from './src/lib/pushNotifications';
@@ -30,6 +31,10 @@ export default function App() {
   const userId = session?.user.id;
   const { profile, loading: profileLoading, error: profileError, refresh } =
     useProfile(userId);
+
+  useEffect(() => {
+    void registerForPushNotificationsAsync();
+  }, []);
 
   useEffect(() => {
     if (!session?.user?.id) {
