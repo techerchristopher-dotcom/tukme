@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
-import Stripe from 'https://esm.sh/stripe@14.21.0?target=deno';
+// denonext évite la couche Node (`processTicksAndRejections` / runMicrotasks) incompatible avec l’Edge Runtime.
+import Stripe from 'https://esm.sh/stripe@14.21.0?target=denonext';
 
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
@@ -40,6 +41,11 @@ Deno.serve(async (req) => {
   }
 
   try {
+    console.log(`${LOG} enter`, { method: req.method });
+
+    const authHeader = req.headers.get('Authorization') ?? '';
+    const hasAuthHeader = authHeader.trim().length > 0;
+
     const stripeKey = Deno.env.get('STRIPE_SECRET_KEY')?.trim() ?? '';
     if (!stripeKey) {
       console.error(`${LOG} missing STRIPE_SECRET_KEY`);
@@ -47,15 +53,6 @@ Deno.serve(async (req) => {
         JSON.stringify({ error: 'Missing STRIPE_SECRET_KEY' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
-    }
-
-    const authHeaderValue = req.headers.get('Authorization') ?? '';
-    if (!authHeaderValue) {
-      console.error(`${LOG} missing Authorization header`);
-      return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
     }
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')?.trim() ?? '';
@@ -66,6 +63,7 @@ Deno.serve(async (req) => {
         hasUrl: !!supabaseUrl,
         hasAnon: !!supabaseAnon,
         hasServiceRole: !!serviceKey,
+        hasAuthHeader,
       });
       return new Response(
         JSON.stringify({
@@ -79,7 +77,7 @@ Deno.serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseAnon, {
       global: {
         headers: {
-          Authorization: authHeaderValue,
+          Authorization: authHeader,
         },
       },
     });
@@ -90,15 +88,20 @@ Deno.serve(async (req) => {
     } = await supabase.auth.getUser();
 
     if (!user) {
-      console.error(`${LOG} User not authenticated via context`, {
-        hasAuthHeader: authHeaderValue.length > 0,
-        authHeaderLength: authHeaderValue.length,
+      console.log('[create-payment-intent] 401 cause: user not resolved');
+      console.error(`${LOG} 401 User not authenticated via context`, {
+        hasAuthHeader,
+        authHeaderLength: authHeader.length,
+        userResolved: false,
+        stripeKeyPresent: !!stripeKey,
+        supabaseUrlPresent: !!supabaseUrl,
         userErrorMessage: userError?.message ?? null,
+        branch: 'auth.getUser() returned null user',
       });
-      return new Response(JSON.stringify({ error: 'Invalid session' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ error: 'User not authenticated via context' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
     }
 
     let body: { ride_id?: string } = {};
@@ -120,7 +123,13 @@ Deno.serve(async (req) => {
       });
     }
 
-    console.log(`${LOG} request`, { userId: user.id, rideId });
+    console.log(`${LOG} request`, {
+      userId: user.id,
+      rideId,
+      hasAuthHeader,
+      userResolved: true,
+      stripeKeyPresent: !!stripeKey,
+    });
 
     const admin = createClient(supabaseUrl, serviceKey);
 
@@ -203,6 +212,7 @@ Deno.serve(async (req) => {
     let clientSecret: string;
 
     if (openRow?.provider_payment_intent_id) {
+      console.log(`${LOG} stripe.retrieve`, { rideId, piId: openRow.provider_payment_intent_id });
       const existing = await stripe.paymentIntents.retrieve(
         openRow.provider_payment_intent_id
       );
@@ -210,6 +220,7 @@ Deno.serve(async (req) => {
         await admin.rpc('mark_ride_paid_after_stripe', {
           p_provider_payment_intent_id: existing.id,
         });
+        console.log(`${LOG} response`, { status: 409, rideId, branch: 'already_paid_existing_pi' });
         return new Response(JSON.stringify({ error: 'Already paid' }), {
           status: 409,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -232,14 +243,27 @@ Deno.serve(async (req) => {
 
       let pi: Stripe.PaymentIntent;
       try {
+        console.log(`${LOG} stripe.paymentIntents.create start`, {
+          rideId,
+          amountCents,
+          currency: 'eur',
+        });
+        const receiptEmail = user.email?.trim() || undefined;
         pi = await stripe.paymentIntents.create({
           amount: amountCents,
           currency: 'eur',
-          automatic_payment_methods: { enabled: true },
+          // MVP mobile : pas de moyens « redirect » (Bancontact, iDEAL, etc.) → évite Safari/hooks.stripe.com bloqué.
+          automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
+          ...(receiptEmail ? { receipt_email: receiptEmail } : {}),
           metadata: {
             ride_id: rideId,
             client_id: ride.client_id,
           },
+        });
+        console.log(`${LOG} stripe.paymentIntents.create ok`, {
+          rideId,
+          piId: pi.id,
+          piStatus: pi.status,
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'Stripe error';
@@ -280,6 +304,11 @@ Deno.serve(async (req) => {
       clientSecret = pi.client_secret;
     }
 
+    console.log(`${LOG} response`, {
+      status: 200,
+      rideId,
+      branch: 'client_secret',
+    });
     return new Response(JSON.stringify({ clientSecret }), {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },

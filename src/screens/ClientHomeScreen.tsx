@@ -62,6 +62,7 @@ import {
   CancelRideError,
 } from '../lib/cancelRide';
 import { invokeCreatePaymentIntent } from '../lib/createPaymentIntent';
+import { syncStripePaymentForRide } from '../lib/syncStripePaymentForRide';
 import { insertRequestedRide } from '../lib/createRide';
 import { notifyRideEvent } from '../lib/pushNotifications';
 import { syncRidePaymentExpiryIfDue } from '../lib/syncRidePaymentExpiry';
@@ -90,6 +91,11 @@ type Props = {
 
 /** Retour 3DS / wallets — aligné sur app.json expo.scheme */
 const STRIPE_RETURN_URL = 'tukme://stripe-redirect';
+
+const PAYMENT_CONFIRM_POLL_MS = 1200;
+const PAYMENT_CONFIRM_MAX_WAIT_MS = 8000;
+/** Court délai pour laisser lire « Paiement confirmé » avant l’écran course. */
+const PAYMENT_CONFIRM_HOLD_AFTER_SYNC_MS = 1000;
 
 function clientRideStatusMessage(status: ClientRideStatus): string {
   switch (status) {
@@ -953,8 +959,10 @@ function ClientHomeMiddleContent(props: {
   const searchHydratedForRideIdRef = useRef<string | null>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [paymentSheetLoading, setPaymentSheetLoading] = useState(false);
-  /** Après succès Payment Sheet : attente webhook → statut `paid` (Realtime). */
+  /** Après succès Payment Sheet : écran intermédiaire puis sync statut ride. */
   const [paymentConfirmPending, setPaymentConfirmPending] = useState(false);
+  const [paymentConfirmSyncTimedOut, setPaymentConfirmSyncTimedOut] =
+    useState(false);
   /** Horloge pour le compte à rebours (alignée sur `payment_expires_at` serveur). */
   const [payClock, setPayClock] = useState(() => Date.now());
   const paymentExpirySyncDoneRef = useRef<string | null>(null);
@@ -997,6 +1005,174 @@ function ClientHomeMiddleContent(props: {
       }),
     ]).start();
   }, [estimateCtaAnim, structuredPickup?.label, structuredDestination?.label]);
+
+  /** Micro-interactions écran post-paiement (paid vs en_route) — Animated API uniquement. */
+  const postPaymentIconPulse = useRef(new Animated.Value(1)).current;
+  const postPaymentIconDriveX = useRef(new Animated.Value(0)).current;
+  const postPaymentSheetOpacity = useRef(new Animated.Value(1)).current;
+  const postPaymentWaitDotsOp = useRef(new Animated.Value(0.45)).current;
+  const postPaymentEnRouteIconScale = useRef(new Animated.Value(1)).current;
+  const postPaymentRoutePhaseRef = useRef<'paid' | 'en_route' | null>(null);
+
+  const isPostPaymentWaitUi =
+    tab === 'home' &&
+    ride != null &&
+    (ride.status === 'paid' || ride.status === 'en_route');
+  const isDriverEnRoutePostPay = ride?.status === 'en_route';
+
+  useEffect(() => {
+    if (!isPostPaymentWaitUi) {
+      postPaymentRoutePhaseRef.current = null;
+      postPaymentSheetOpacity.setValue(1);
+      postPaymentEnRouteIconScale.setValue(1);
+      return;
+    }
+    const phase: 'paid' | 'en_route' = isDriverEnRoutePostPay
+      ? 'en_route'
+      : 'paid';
+    const prev = postPaymentRoutePhaseRef.current;
+    if (prev === null) {
+      postPaymentRoutePhaseRef.current = phase;
+      if (phase === 'en_route') {
+        postPaymentEnRouteIconScale.setValue(0.9);
+        Animated.spring(postPaymentEnRouteIconScale, {
+          toValue: 1,
+          friction: 8,
+          tension: 100,
+          useNativeDriver: true,
+        }).start();
+      }
+      return;
+    }
+    if (prev !== phase) {
+      postPaymentRoutePhaseRef.current = phase;
+      if (phase === 'en_route') {
+        postPaymentSheetOpacity.setValue(0.86);
+        postPaymentEnRouteIconScale.setValue(0.9);
+        Animated.parallel([
+          Animated.timing(postPaymentSheetOpacity, {
+            toValue: 1,
+            duration: 420,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+          }),
+          Animated.spring(postPaymentEnRouteIconScale, {
+            toValue: 1,
+            friction: 7,
+            tension: 120,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      } else {
+        postPaymentSheetOpacity.setValue(0.92);
+        Animated.timing(postPaymentSheetOpacity, {
+          toValue: 1,
+          duration: 320,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }).start();
+        postPaymentEnRouteIconScale.setValue(1);
+      }
+    }
+  }, [
+    isPostPaymentWaitUi,
+    isDriverEnRoutePostPay,
+    postPaymentSheetOpacity,
+    postPaymentEnRouteIconScale,
+  ]);
+
+  useEffect(() => {
+    if (!isPostPaymentWaitUi || isDriverEnRoutePostPay) {
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(postPaymentIconPulse, {
+          toValue: 1.06,
+          duration: 1300,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+        Animated.timing(postPaymentIconPulse, {
+          toValue: 1,
+          duration: 1300,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+      postPaymentIconPulse.setValue(1);
+    };
+  }, [
+    isPostPaymentWaitUi,
+    isDriverEnRoutePostPay,
+    postPaymentIconPulse,
+  ]);
+
+  useEffect(() => {
+    if (!isPostPaymentWaitUi || !isDriverEnRoutePostPay) {
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(postPaymentIconDriveX, {
+          toValue: 6,
+          duration: 650,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(postPaymentIconDriveX, {
+          toValue: -6,
+          duration: 650,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+      postPaymentIconDriveX.setValue(0);
+    };
+  }, [
+    isPostPaymentWaitUi,
+    isDriverEnRoutePostPay,
+    postPaymentIconDriveX,
+  ]);
+
+  useEffect(() => {
+    if (!isPostPaymentWaitUi || isDriverEnRoutePostPay) {
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(postPaymentWaitDotsOp, {
+          toValue: 1,
+          duration: 520,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(postPaymentWaitDotsOp, {
+          toValue: 0.35,
+          duration: 520,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+      postPaymentWaitDotsOp.setValue(0.45);
+    };
+  }, [
+    isPostPaymentWaitUi,
+    isDriverEnRoutePostPay,
+    postPaymentWaitDotsOp,
+  ]);
 
   // État “trajet déjà choisi” = destination fixée, pas encore de ride.
   // Il doit basculer sur un écran résumé (type Bolt) sans aucune UI de saisie.
@@ -1203,10 +1379,49 @@ function ClientHomeMiddleContent(props: {
 
   useEffect(() => {
     if (ride?.status === 'paid') {
-      setPaymentConfirmPending(false);
       setPaymentSheetLoading(false);
     }
   }, [ride?.status]);
+
+  useEffect(() => {
+    if (!paymentConfirmPending) {
+      return;
+    }
+    const id = setInterval(() => {
+      void refetchOpenRide();
+    }, PAYMENT_CONFIRM_POLL_MS);
+    return () => clearInterval(id);
+  }, [paymentConfirmPending, refetchOpenRide]);
+
+  useEffect(() => {
+    if (!paymentConfirmPending) {
+      return;
+    }
+    setPaymentConfirmSyncTimedOut(false);
+    const t = setTimeout(() => {
+      setPaymentConfirmSyncTimedOut(true);
+    }, PAYMENT_CONFIRM_MAX_WAIT_MS);
+    return () => clearTimeout(t);
+  }, [paymentConfirmPending, ride?.id]);
+
+  useEffect(() => {
+    if (!paymentConfirmPending || !ride) {
+      return;
+    }
+    const synced =
+      ride.status === 'paid' ||
+      ride.status === 'en_route' ||
+      ride.status === 'arrived' ||
+      ride.status === 'in_progress';
+    if (!synced) {
+      return;
+    }
+    const t = setTimeout(() => {
+      setPaymentConfirmPending(false);
+      setPaymentConfirmSyncTimedOut(false);
+    }, PAYMENT_CONFIRM_HOLD_AFTER_SYNC_MS);
+    return () => clearTimeout(t);
+  }, [paymentConfirmPending, ride?.status]);
 
   useEffect(() => {
     if (ride?.status !== 'awaiting_payment') {
@@ -1715,7 +1930,9 @@ function ClientHomeMiddleContent(props: {
         return;
       }
 
+      setPaymentConfirmSyncTimedOut(false);
       setPaymentConfirmPending(true);
+      await syncStripePaymentForRide(rideId);
       void refetchOpenRide();
     } finally {
       paymentInFlightRef.current = false;
@@ -1852,7 +2069,52 @@ function ClientHomeMiddleContent(props: {
     tab === 'home' &&
     (uiRideStatus === 'searching_driver' || ride?.status === 'requested');
 
-  const showAwaitingPaymentView = tab === 'home' && ride?.status === 'awaiting_payment';
+  const showPaymentConfirmedView =
+    tab === 'home' && paymentConfirmPending && ride != null;
+
+  const showAwaitingPaymentView =
+    tab === 'home' &&
+    ride?.status === 'awaiting_payment' &&
+    !paymentConfirmPending;
+
+  const paymentConfirmedBlock = (
+    <View style={styles.awaitingPaySheet}>
+      <View style={styles.paymentConfirmIconWrap}>
+        <Ionicons name="checkmark-circle" size={40} color={BRAND_PRIMARY} />
+      </View>
+      <Text style={styles.awaitingPayTitle}>Paiement confirmé</Text>
+      <Text style={[styles.awaitingPaySubtitle, styles.paymentConfirmSubtitleSpaced]}>
+        Votre paiement a bien été reçu. Redirection vers votre course en
+        cours…
+      </Text>
+      <View style={styles.paymentConfirmLoaderWrap}>
+        <ActivityIndicator size="large" color={BRAND_PRIMARY} />
+      </View>
+      {paymentConfirmSyncTimedOut &&
+      ride &&
+      (ride.status === 'awaiting_payment' || ride.status === 'expired') ? (
+        <>
+          <Text style={styles.awaitingPayMuted}>
+            La mise à jour prend un peu plus de temps. Vous pouvez actualiser.
+          </Text>
+          <Pressable
+            style={({ pressed }) => [
+              styles.awaitingPayCancelBtn,
+              pressed && styles.awaitingPayCancelBtnPressed,
+            ]}
+            onPress={() =>
+              void (async () => {
+                await syncStripePaymentForRide(ride.id);
+                void refetchOpenRide();
+              })()
+            }
+          >
+            <Text style={styles.awaitingPayCancelText}>Actualiser</Text>
+          </Pressable>
+        </>
+      ) : null}
+    </View>
+  );
 
   const awaitingPaymentBlock =
     !showBoltTripSummary && ride?.status === 'awaiting_payment' ? (
@@ -1987,6 +2249,79 @@ function ClientHomeMiddleContent(props: {
     );
   }
 
+  // Après paiement Stripe : écran court avant retour à la course (sync statut).
+  if (showPaymentConfirmedView) {
+    return (
+      <View style={styles.boltRoot}>
+        {mapElement}
+        <SafeAreaView style={styles.awaitingPaySafeBottom} pointerEvents="box-none">
+          <View style={styles.awaitingPayBottomSheet}>
+            <View style={styles.sheetGrabber} />
+            {paymentConfirmedBlock}
+          </View>
+        </SafeAreaView>
+        <SafeAreaView style={styles.bottomNavSafe} pointerEvents="box-none">
+          <View style={styles.bottomNav}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'home' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('home')}
+            >
+              <Ionicons
+                name={tab === 'home' ? 'home' : 'home-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'home' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'home' ? styles.navTextActive : styles.navText}>
+                Accueil
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'trips' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('trips')}
+            >
+              <Ionicons
+                name={tab === 'trips' ? 'time' : 'time-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'trips' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'trips' ? styles.navTextActive : styles.navText}>
+                Trajets
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'account' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('account')}
+            >
+              <Ionicons
+                name={tab === 'account' ? 'person' : 'person-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'account' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text
+                style={tab === 'account' ? styles.navTextActive : styles.navText}
+              >
+                Compte
+              </Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
+        <StatusBar barStyle="dark-content" />
+      </View>
+    );
+  }
+
   // IMPORTANT UX: awaiting_payment est un écran dédié : map + paiement uniquement.
   if (showAwaitingPaymentView) {
     return (
@@ -1996,6 +2331,160 @@ function ClientHomeMiddleContent(props: {
           <View style={styles.awaitingPayBottomSheet}>
             <View style={styles.sheetGrabber} />
             {awaitingPaymentBlock}
+          </View>
+        </SafeAreaView>
+        <SafeAreaView style={styles.bottomNavSafe} pointerEvents="box-none">
+          <View style={styles.bottomNav}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'home' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('home')}
+            >
+              <Ionicons
+                name={tab === 'home' ? 'home' : 'home-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'home' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'home' ? styles.navTextActive : styles.navText}>
+                Accueil
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'trips' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('trips')}
+            >
+              <Ionicons
+                name={tab === 'trips' ? 'time' : 'time-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'trips' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'trips' ? styles.navTextActive : styles.navText}>
+                Trajets
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'account' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('account')}
+            >
+              <Ionicons
+                name={tab === 'account' ? 'person' : 'person-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'account' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text
+                style={tab === 'account' ? styles.navTextActive : styles.navText}
+              >
+                Compte
+              </Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
+        <StatusBar barStyle="dark-content" />
+      </View>
+    );
+  }
+
+  // Après paiement : attente départ chauffeur (paid) puis trajet (en_route) — UI minimale, sans formulaire.
+  const showPostPaymentDriverWaitView =
+    tab === 'home' &&
+    ride != null &&
+    (ride.status === 'paid' || ride.status === 'en_route');
+
+  if (showPostPaymentDriverWaitView) {
+    const isDriverEnRoute = ride.status === 'en_route';
+    const waitStatusLine = isDriverEnRoute
+      ? 'Chauffeur en route'
+      : 'En attente du départ du chauffeur';
+    const waitHint = isDriverEnRoute
+      ? 'Votre chauffeur se dirige vers vous'
+      : 'Le chauffeur va bientôt confirmer son départ';
+
+    return (
+      <View style={styles.boltRoot}>
+        {mapElement}
+        <SafeAreaView style={styles.awaitingPaySafeBottom} pointerEvents="box-none">
+          <View style={styles.awaitingPayBottomSheet}>
+            <View style={styles.sheetGrabber} />
+            <Animated.View
+              style={[
+                styles.awaitingPaySheet,
+                isDriverEnRoute
+                  ? styles.awaitingPaySheetPostEnRoute
+                  : styles.awaitingPaySheetPostWait,
+                { opacity: postPaymentSheetOpacity },
+              ]}
+            >
+              <Animated.View
+                style={[
+                  styles.postPaymentStateIconRing,
+                  isDriverEnRoute
+                    ? styles.postPaymentStateIconRingEnRoute
+                    : styles.postPaymentStateIconRingPaid,
+                  isDriverEnRoute
+                    ? {
+                        transform: [
+                          { scale: postPaymentEnRouteIconScale },
+                          { translateX: postPaymentIconDriveX },
+                        ],
+                      }
+                    : {
+                        transform: [{ scale: postPaymentIconPulse }],
+                      },
+                ]}
+              >
+                <Ionicons
+                  name={isDriverEnRoute ? 'car' : 'hourglass-outline'}
+                  size={isDriverEnRoute ? 40 : 34}
+                  color={isDriverEnRoute ? '#16a34a' : '#d97706'}
+                />
+              </Animated.View>
+              <Text style={styles.awaitingPayTitle}>Tout est en ordre</Text>
+              <Text style={[styles.awaitingPaySubtitle, styles.paymentConfirmSubtitleSpaced]}>
+                Votre paiement est validé. Vous n’avez rien d’autre à faire pour le moment.
+              </Text>
+              <Text
+                style={[
+                  styles.postPaymentWaitStatus,
+                  isDriverEnRoute
+                    ? styles.postPaymentWaitStatusEnRoute
+                    : styles.postPaymentWaitStatusPaid,
+                ]}
+              >
+                {waitStatusLine}
+              </Text>
+              <Text
+                style={[
+                  styles.awaitingPayMuted,
+                  styles.postPaymentWaitHint,
+                  isDriverEnRoute
+                    ? styles.postPaymentWaitHintEnRoute
+                    : styles.postPaymentWaitHintPaid,
+                ]}
+              >
+                {waitHint}
+                {!isDriverEnRoute ? (
+                  <Animated.Text
+                    style={[
+                      styles.postPaymentEllipsis,
+                      { opacity: postPaymentWaitDotsOp },
+                    ]}
+                  >
+                    ...
+                  </Animated.Text>
+                ) : null}
+              </Text>
+            </Animated.View>
           </View>
         </SafeAreaView>
         <SafeAreaView style={styles.bottomNavSafe} pointerEvents="box-none">
@@ -3963,6 +4452,67 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '700',
     color: '#fff',
+  },
+  paymentConfirmIconWrap: {
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  paymentConfirmSubtitleSpaced: {
+    marginTop: 10,
+  },
+  paymentConfirmLoaderWrap: {
+    marginVertical: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  postPaymentWaitStatus: {
+    marginTop: 14,
+    fontSize: 17,
+    fontWeight: '800',
+    textAlign: 'center',
+    lineHeight: 24,
+  },
+  postPaymentWaitStatusPaid: {
+    color: '#b45309',
+  },
+  postPaymentWaitStatusEnRoute: {
+    color: '#15803d',
+  },
+  postPaymentWaitHint: {
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  postPaymentWaitHintPaid: {
+    color: '#92400e',
+  },
+  postPaymentWaitHintEnRoute: {
+    color: '#166534',
+  },
+  postPaymentEllipsis: {
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  postPaymentStateIconRing: {
+    alignSelf: 'center',
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
+  },
+  postPaymentStateIconRingPaid: {
+    backgroundColor: '#fef3c7',
+  },
+  postPaymentStateIconRingEnRoute: {
+    backgroundColor: '#dcfce7',
+  },
+  awaitingPaySheetPostWait: {
+    borderColor: '#fcd34d',
+  },
+  awaitingPaySheetPostEnRoute: {
+    borderColor: '#86efac',
   },
   awaitingPaySheet: {
     marginTop: 12,

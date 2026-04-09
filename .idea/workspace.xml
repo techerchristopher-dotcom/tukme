@@ -5,13 +5,23 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="899e4828-6492-45cb-b9d6-e50a9af785af" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/eas.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/App.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/App.tsx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/admin/src/app/drivers/[driverId]/page.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/admin/src/app/drivers/[driverId]/page.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/admin/src/lib/adminApi.ts" beforeDir="false" afterPath="$PROJECT_DIR$/admin/src/lib/adminApi.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/admin/src/lib/supabaseBrowserClient.ts" beforeDir="false" afterPath="$PROJECT_DIR$/admin/src/lib/supabaseBrowserClient.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/admin/src/lib/types.ts" beforeDir="false" afterPath="$PROJECT_DIR$/admin/src/lib/types.ts" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app.json" beforeDir="false" afterPath="$PROJECT_DIR$/app.json" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/package-lock.json" beforeDir="false" afterPath="$PROJECT_DIR$/package-lock.json" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/package.json" beforeDir="false" afterPath="$PROJECT_DIR$/package.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/screens/HomeScreen.tsx" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/hooks/useClientLocation.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/hooks/useClientLocation.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/pushNotifications.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/pushNotifications.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/screens/ClientHomeScreen.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/src/screens/ClientHomeScreen.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/screens/ClientMapBlock.native.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/src/screens/ClientMapBlock.native.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/screens/ClientMapBlock.web.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/src/screens/ClientMapBlock.web.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/screens/clientMapStyles.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/screens/clientMapStyles.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/supabase/functions/admin-api/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/supabase/functions/admin-api/index.ts" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -24,9 +34,9 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="ProjectColorInfo"><![CDATA[{
-  "associatedIndex": 3
-}]]></component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 3
+}</component>
   <component name="ProjectId" id="3BqkvQXta6nooB0TQcSTi0pFX6P" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
@@ -37,6 +47,7 @@
     "ModuleVcsDetector.initialDetectionPerformed": "true",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.cidr.known.project.marker": "true",
+    "RunOnceActivity.git.unshallow": "true",
     "RunOnceActivity.readMode.enableVisualFormatting": "true",
     "cf.first.check.clang-format": "false",
     "cidr.known.project.marker": "true",

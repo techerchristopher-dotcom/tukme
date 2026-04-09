@@ -5,6 +5,8 @@ type PublicEnv = {
   supabaseUrl: string;
   supabaseAnonKey: string;
   googlePlacesApiKey: string;
+  /** Activer des logs temporaires (sans secrets) en build. */
+  diagPayments: string;
 };
 
 function readPublicEnvFromExtra(): Partial<PublicEnv> | null {
@@ -43,6 +45,9 @@ export function getPublicEnv(): PublicEnv {
       fromExtra?.googlePlacesApiKey ??
         process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY
     ),
+    diagPayments: normalize(
+      fromExtra?.diagPayments ?? process.env.EXPO_PUBLIC_DIAG_PAYMENTS
+    ),
   };
 }
 
@@ -60,5 +65,10 @@ export function getSupabaseUrl(): string {
 
 export function getSupabaseAnonKey(): string {
   return getPublicEnv().supabaseAnonKey;
+}
+
+export function diagPaymentsEnabled(): boolean {
+  const v = getPublicEnv().diagPayments.toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
 }
 
