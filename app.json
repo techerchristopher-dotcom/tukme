@@ -21,7 +21,8 @@
         {
           "enableGooglePay": false
         }
-      ]
+      ],
+      "expo-font"
     ],
     "splash": {
       "image": "./assets/splash-icon.png",
@@ -29,7 +30,11 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tukme.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.tukme.app",
@@ -38,10 +43,20 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "6e2273c8-60d1-465b-809c-063bb15c9bea"
+      }
+    },
+    "owner": "chris97416"
   }
 }

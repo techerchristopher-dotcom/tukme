@@ -29,6 +29,8 @@ const BASE_URL = (() => {
   return `${url.replace(/\/+$/, '')}/functions/v1/admin-api`;
 })();
 
+const API_KEY = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '').trim();
+
 function readStringProp(obj: Record<string, unknown>, key: string): string | null {
   const v = obj[key];
   return typeof v === 'string' && v.trim() ? v.trim() : null;
@@ -83,6 +85,50 @@ async function fetchAdmin<T>(pathAndQuery: string): Promise<ApiResult<T>> {
   if (process.env.NODE_ENV !== 'production') {
     // eslint-disable-next-line no-console
     console.debug('[adminApi] access_token present:', token.length > 0);
+    // eslint-disable-next-line no-console
+    console.debug('[adminApi] apikey present:', API_KEY.length > 0);
+    // eslint-disable-next-line no-console
+    console.debug('[adminApi] session present:', !!data.session);
+    // eslint-disable-next-line no-console
+    console.debug('[adminApi] session expires_at:', data.session?.expires_at ?? null);
+    // eslint-disable-next-line no-console
+    console.debug('[adminApi] token prefix:', token.slice(0, 16));
+    // eslint-disable-next-line no-console
+    console.debug('[adminApi] token suffix:', token.slice(-16));
+
+    // Check what Supabase Auth thinks the current user is (should match JWT sub).
+    try {
+      const { data: u, error: ue } = await supabase.auth.getUser();
+      // eslint-disable-next-line no-console
+      console.debug('[adminApi] getUser ok:', !ue);
+      // eslint-disable-next-line no-console
+      console.debug('[adminApi] getUser error:', ue?.message ?? null);
+      // eslint-disable-next-line no-console
+      console.debug('[adminApi] user id:', u.user?.id ?? null);
+      // eslint-disable-next-line no-console
+      console.debug('[adminApi] user email:', u.user?.email ?? null);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.debug('[adminApi] getUser threw:', e instanceof Error ? e.message : String(e));
+    }
+
+    // Optional claims helper if available in this SDK version.
+    try {
+      const anyAuth = supabase.auth as unknown as { getClaims?: () => Promise<unknown> };
+      if (typeof anyAuth.getClaims === 'function') {
+        const claims = await anyAuth.getClaims();
+        // eslint-disable-next-line no-console
+        console.debug('[adminApi] getClaims available: true');
+        // eslint-disable-next-line no-console
+        console.debug('[adminApi] claims (raw):', claims);
+      } else {
+        // eslint-disable-next-line no-console
+        console.debug('[adminApi] getClaims available: false');
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.debug('[adminApi] getClaims threw:', e instanceof Error ? e.message : String(e));
+    }
   }
 
   const controller = new AbortController();
@@ -92,7 +138,10 @@ async function fetchAdmin<T>(pathAndQuery: string): Promise<ApiResult<T>> {
   try {
     res = await fetch(`${BASE_URL}${pathAndQuery}`, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(API_KEY ? { apikey: API_KEY } : {}),
+      },
       signal: controller.signal,
     });
   } catch (e) {
@@ -154,6 +203,7 @@ async function callAdminJson<T>(args: {
       method: args.method,
       headers: {
         Authorization: `Bearer ${token}`,
+        ...(API_KEY ? { apikey: API_KEY } : {}),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(args.body),
@@ -209,7 +259,10 @@ async function callAdminDelete<T>(path: string): Promise<ApiResult<T>> {
   try {
     res = await fetch(`${BASE_URL}${path}`, {
       method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(API_KEY ? { apikey: API_KEY } : {}),
+      },
       signal: controller.signal,
     });
   } catch (e) {
@@ -349,6 +402,38 @@ export async function getDriverDetail(params: {
     offset: params.offset ?? 0,
   });
   return fetchAdmin(`/drivers/${encodeURIComponent(id)}/detail${query}`);
+}
+
+export async function retireDriverCurrentVehicle(driverId: string): Promise<ApiResult<{ ok: boolean }>> {
+  const id = driverId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant chauffeur invalide' } };
+  }
+  return callAdminDelete<{ ok: boolean }>(`/drivers/${encodeURIComponent(id)}/vehicle`);
+}
+
+export async function setDriverCurrentVehicle(input: {
+  driverId: string;
+  kind: string;
+  plate_number: string;
+}): Promise<ApiResult<{ vehicle_id: string }>> {
+  const id = input.driverId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant chauffeur invalide' } };
+  }
+  const kind = input.kind.trim();
+  const plate = input.plate_number.trim();
+  if (!kind) {
+    return { data: null, error: { message: 'Type véhicule obligatoire' } };
+  }
+  if (!plate) {
+    return { data: null, error: { message: 'Immatriculation obligatoire' } };
+  }
+  return callAdminJson<{ vehicle_id: string }>({
+    path: `/drivers/${encodeURIComponent(id)}/vehicle`,
+    method: 'POST',
+    body: { kind, plate_number: plate },
+  });
 }
 
 export async function createDriver(

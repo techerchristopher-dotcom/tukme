@@ -155,8 +155,16 @@ export type DriverDetailResponse = {
   driver: DriverProfileRow;
   balance: DriverBalanceRow;
   today: DriverDailySummaryRow | null;
+  current_vehicle: CurrentVehicle | null;
   rides: Paginated<CompletedRideRow>;
   payouts: Paginated<PayoutRow>;
   rents: Paginated<DailyRentRow>;
+};
+
+export type CurrentVehicle = {
+  id: string;
+  kind: string | null;
+  plate_number: string | null;
+  active: boolean | null;
 };
 

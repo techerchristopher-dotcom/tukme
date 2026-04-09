@@ -129,4 +129,47 @@ export const clientMapStyles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#fff',
   },
+  /**
+   * « Me recentrer » — au-dessus du blanc du bottom sheet (~78 + zone grabber),
+   * sans empiéter sur la sheet (était bottom: 180, puis 232).
+   */
+  meRecenterFabShadow: {
+    position: 'absolute',
+    right: 14,
+    bottom: 300,
+    width: 48,
+    height: 48,
+    borderRadius: 999,
+    zIndex: 60,
+    shadowColor: '#0f766e',
+    shadowOpacity: 0.22,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 5 },
+    elevation: 7,
+  },
+  meRecenterFab: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 999,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255, 255, 255, 0.88)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(15, 23, 42, 0.1)',
+  },
+  meRecenterFabShine: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 999,
+  },
+  meRecenterFabPressable: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 999,
+  },
+  meRecenterFabPressed: {
+    opacity: 0.86,
+  },
 });

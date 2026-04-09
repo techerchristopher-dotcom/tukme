@@ -87,6 +87,18 @@ function asInt(v: unknown): number | null {
   return null;
 }
 
+function requireBodyString(body: Record<string, unknown>, key: string): string {
+  const v = body[key];
+  if (typeof v !== 'string') {
+    throw Object.assign(new Error(`${key} must be a string`), { status: 400 });
+  }
+  const t = v.trim();
+  if (!t) {
+    throw Object.assign(new Error(`${key} is required`), { status: 400 });
+  }
+  return t;
+}
+
 async function readJsonBody(req: Request): Promise<Record<string, unknown>> {
   const ct = (req.headers.get('content-type') ?? '').toLowerCase();
   if (!ct.includes('application/json')) {
@@ -300,6 +312,47 @@ async function handleDriverDetail(req: Request, url: URL, driverIdRaw: string) {
     return jsonResponse(404, { data: null, error: { message: 'Driver not found' } });
   }
 
+  // Current vehicle (source of truth: active assignment ends_at is null).
+  // We do NOT depend on the "today" read-model here.
+  let currentVehicle: {
+    id: string;
+    kind: string | null;
+    plate_number: string | null;
+    active: boolean | null;
+  } | null = null;
+
+  const { data: activeAssign, error: aErr } = await adminClient
+    .from('driver_vehicle_assignments')
+    .select('vehicle_id, starts_at')
+    .eq('driver_id', driverId)
+    .is('ends_at', null)
+    .order('starts_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (aErr) {
+    console.error('[admin-api] current assignment', aErr.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  if (activeAssign?.vehicle_id) {
+    const { data: vRow, error: vErr } = await adminClient
+      .from('vehicles')
+      .select('id, kind, plate_number, active')
+      .eq('id', activeAssign.vehicle_id)
+      .maybeSingle();
+    if (vErr) {
+      console.error('[admin-api] current vehicle', vErr.message);
+      return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+    }
+    if (vRow) {
+      currentVehicle = {
+        id: String(vRow.id),
+        kind: typeof vRow.kind === 'string' ? vRow.kind : null,
+        plate_number: typeof vRow.plate_number === 'string' ? vRow.plate_number : null,
+        active: typeof vRow.active === 'boolean' ? vRow.active : null,
+      };
+    }
+  }
+
   const { data: balance, error: balErr } = await adminClient
     .from('driver_balances')
     .select('*')
@@ -366,12 +419,62 @@ async function handleDriverDetail(req: Request, url: URL, driverIdRaw: string) {
       driver: profile,
       balance: balance ?? { driver_id: driverId, total_credits_ariary: 0, total_debits_ariary: 0, driver_balance_ariary: 0 },
       today,
+      current_vehicle: currentVehicle,
       rides: { items: rides ?? [], count: ridesCount ?? 0, limit, offset },
       payouts: { items: payouts ?? [], count: payoutsCount ?? 0, limit, offset },
       rents: { items: rents ?? [], count: rentsCount ?? 0, limit, offset },
     },
     error: null,
   });
+}
+
+async function handleRetireCurrentVehicle(req: Request, driverIdRaw: string): Promise<Response> {
+  const driverId = normalizePathId(driverIdRaw);
+  if (!isUuid(driverId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid driverId' } });
+  }
+
+  const { adminClient } = await requireAdmin(req);
+
+  const { error } = await adminClient.rpc('admin_retire_current_vehicle', {
+    p_driver_id: driverId,
+  });
+  if (error) {
+    const msg = String(error.message ?? '');
+    console.error('[admin-api] admin_retire_current_vehicle', msg);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  return jsonResponse(200, { data: { ok: true }, error: null });
+}
+
+async function handleSetCurrentVehicle(req: Request, driverIdRaw: string): Promise<Response> {
+  const driverId = normalizePathId(driverIdRaw);
+  if (!isUuid(driverId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid driverId' } });
+  }
+
+  const { adminClient } = await requireAdmin(req);
+  const body = await readJsonBody(req);
+
+  const kind = requireBodyString(body, 'kind');
+  const plate = requireBodyString(body, 'plate_number');
+
+  const { data: vehicleId, error } = await adminClient.rpc('admin_set_current_vehicle', {
+    p_driver_id: driverId,
+    p_kind: kind,
+    p_plate_number: plate,
+  });
+  if (error) {
+    const msg = String(error.message ?? '');
+    if (msg.includes('PLATE_INVALID')) {
+      return jsonResponse(400, { data: null, error: { message: 'Immatriculation invalide.' } });
+    }
+    console.error('[admin-api] admin_set_current_vehicle', msg);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  return jsonResponse(200, { data: { vehicle_id: vehicleId }, error: null });
 }
 
 type CreatePayoutInput = {
@@ -771,6 +874,14 @@ Deno.serve(async (req) => {
       if (rest.length >= 2 && rest[1] === 'detail') {
         const driverId = normalizePathId(rest[0] ?? '');
         return await handleDriverDetail(req, url, driverId);
+      }
+      if (rest.length === 2 && rest[1] === 'vehicle' && req.method === 'DELETE') {
+        const driverId = normalizePathId(rest[0] ?? '');
+        return await handleRetireCurrentVehicle(req, driverId);
+      }
+      if (rest.length === 2 && rest[1] === 'vehicle' && req.method === 'POST') {
+        const driverId = normalizePathId(rest[0] ?? '');
+        return await handleSetCurrentVehicle(req, driverId);
       }
       if (rest.length === 2 && rest[1] === 'reactivate' && req.method === 'POST') {
         const driverId = normalizePathId(rest[0] ?? '');

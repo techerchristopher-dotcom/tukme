@@ -7,6 +7,8 @@ const corsHeaders: Record<string, string> = {
     'authorization, x-client-info, apikey, content-type',
 };
 
+const LOG = '[create-payment-intent]';
+
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY') ?? '', {
   apiVersion: '2023-10-16',
   httpClient: Stripe.createFetchHttpClient(),
@@ -38,45 +40,96 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const authHeader = req.headers.get('Authorization');
-    if (!authHeader?.startsWith('Bearer ')) {
+    const stripeKey = Deno.env.get('STRIPE_SECRET_KEY')?.trim() ?? '';
+    if (!stripeKey) {
+      console.error(`${LOG} missing STRIPE_SECRET_KEY`);
+      return new Response(
+        JSON.stringify({ error: 'Missing STRIPE_SECRET_KEY' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const authHeaderValue = req.headers.get('Authorization') ?? '';
+    if (!authHeaderValue) {
+      console.error(`${LOG} missing Authorization header`);
       return new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseAnon = Deno.env.get('SUPABASE_ANON_KEY')!;
-    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')?.trim() ?? '';
+    const supabaseAnon = Deno.env.get('SUPABASE_ANON_KEY')?.trim() ?? '';
+    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')?.trim() ?? '';
+    if (!supabaseUrl || !supabaseAnon || !serviceKey) {
+      console.error(`${LOG} missing Supabase env`, {
+        hasUrl: !!supabaseUrl,
+        hasAnon: !!supabaseAnon,
+        hasServiceRole: !!serviceKey,
+      });
+      return new Response(
+        JSON.stringify({
+          error:
+            'Missing SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_SERVICE_ROLE_KEY',
+        }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
 
-    const userClient = createClient(supabaseUrl, supabaseAnon, {
-      global: { headers: { Authorization: authHeader } },
+    const supabase = createClient(supabaseUrl, supabaseAnon, {
+      global: {
+        headers: {
+          Authorization: authHeaderValue,
+        },
+      },
     });
 
     const {
       data: { user },
-      error: userErr,
-    } = await userClient.auth.getUser();
-    if (userErr || !user) {
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      console.error(`${LOG} User not authenticated via context`, {
+        hasAuthHeader: authHeaderValue.length > 0,
+        authHeaderLength: authHeaderValue.length,
+        userErrorMessage: userError?.message ?? null,
+      });
       return new Response(JSON.stringify({ error: 'Invalid session' }), {
         status: 401,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
-    const body = (await req.json()) as { ride_id?: string };
+    let body: { ride_id?: string } = {};
+    try {
+      body = (await req.json()) as { ride_id?: string };
+    } catch (e) {
+      console.error(`${LOG} invalid json`, e);
+      return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
     const rideId = body.ride_id?.trim();
     if (!rideId) {
+      console.error(`${LOG} ride_id required`, body);
       return new Response(JSON.stringify({ error: 'ride_id required' }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
+    console.log(`${LOG} request`, { userId: user.id, rideId });
+
     const admin = createClient(supabaseUrl, serviceKey);
 
-    await admin.rpc('expire_rides_past_payment_deadline');
+    const { error: expireErr } = await admin.rpc(
+      'expire_rides_past_payment_deadline'
+    );
+    if (expireErr) {
+      console.error(`${LOG} expire rpc failed`, expireErr.message);
+    }
 
     const { data: ride, error: rideErr } = await admin
       .from('rides')
@@ -87,6 +140,7 @@ Deno.serve(async (req) => {
       .maybeSingle();
 
     if (rideErr || !ride) {
+      console.error(`${LOG} ride not found`, { rideId, rideErr: rideErr?.message });
       return new Response(JSON.stringify({ error: 'Ride not found' }), {
         status: 404,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -94,6 +148,11 @@ Deno.serve(async (req) => {
     }
 
     if (ride.client_id !== user.id) {
+      console.error(`${LOG} forbidden`, {
+        rideId,
+        rideClientId: ride.client_id,
+        userId: user.id,
+      });
       return new Response(JSON.stringify({ error: 'Forbidden' }), {
         status: 403,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -101,6 +160,7 @@ Deno.serve(async (req) => {
     }
 
     if (ride.status !== 'awaiting_payment') {
+      console.error(`${LOG} invalid ride status`, { rideId, status: ride.status });
       return new Response(
         JSON.stringify({ error: 'Ride is not awaiting payment' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -111,6 +171,7 @@ Deno.serve(async (req) => {
       ? Date.parse(String(ride.payment_expires_at))
       : NaN;
     if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
+      console.error(`${LOG} payment window expired`, { rideId, expiresAt });
       return new Response(
         JSON.stringify({ error: 'Payment window has expired' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -125,6 +186,7 @@ Deno.serve(async (req) => {
       .maybeSingle();
 
     if (paid) {
+      console.error(`${LOG} already paid`, { rideId });
       return new Response(JSON.stringify({ error: 'Already paid' }), {
         status: 409,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -154,6 +216,10 @@ Deno.serve(async (req) => {
         });
       }
       if (!existing.client_secret) {
+        console.error(`${LOG} missing client_secret on existing PI`, {
+          rideId,
+          piId: existing.id,
+        });
         return new Response(JSON.stringify({ error: 'Payment intent invalid' }), {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -164,17 +230,28 @@ Deno.serve(async (req) => {
       const eur = Number(ride.estimated_price_eur);
       const amountCents = Math.max(50, Math.round(eur * 100));
 
-      const pi = await stripe.paymentIntents.create({
-        amount: amountCents,
-        currency: 'eur',
-        automatic_payment_methods: { enabled: true },
-        metadata: {
-          ride_id: rideId,
-          client_id: ride.client_id,
-        },
-      });
+      let pi: Stripe.PaymentIntent;
+      try {
+        pi = await stripe.paymentIntents.create({
+          amount: amountCents,
+          currency: 'eur',
+          automatic_payment_methods: { enabled: true },
+          metadata: {
+            ride_id: rideId,
+            client_id: ride.client_id,
+          },
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Stripe error';
+        console.error(`${LOG} stripe.paymentIntents.create failed`, msg);
+        return new Response(JSON.stringify({ error: msg }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
 
       if (!pi.client_secret) {
+        console.error(`${LOG} missing client_secret from stripe`, { rideId, piId: pi.id });
         return new Response(JSON.stringify({ error: 'Stripe error' }), {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -192,6 +269,7 @@ Deno.serve(async (req) => {
       });
 
       if (insErr) {
+        console.error(`${LOG} insert payment failed`, insErr.message);
         await stripe.paymentIntents.cancel(pi.id).catch(() => undefined);
         return new Response(JSON.stringify({ error: insErr.message }), {
           status: 500,
@@ -208,6 +286,7 @@ Deno.serve(async (req) => {
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
+    console.error(`${LOG} unhandled`, msg);
     return new Response(JSON.stringify({ error: msg }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },

@@ -5,6 +5,8 @@
  * @see https://developers.google.com/maps/documentation/routes/compute_route_directions
  */
 
+import { getGooglePlacesApiKey } from './env';
+
 const COMPUTE_ROUTES_URL =
   'https://routes.googleapis.com/directions/v2:computeRoutes';
 
@@ -26,7 +28,7 @@ export type RouteMetrics = {
 };
 
 function getApiKey(): string {
-  const key = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY?.trim();
+  const key = getGooglePlacesApiKey();
   if (!key) {
     throw new Error('EXPO_PUBLIC_GOOGLE_PLACES_API_KEY manquante');
   }
@@ -34,7 +36,7 @@ function getApiKey(): string {
 }
 
 export function isRoutesApiConfigured(): boolean {
-  return !!process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY?.trim();
+  return getGooglePlacesApiKey().length > 0;
 }
 
 function parseDurationSeconds(duration: unknown): number | null {

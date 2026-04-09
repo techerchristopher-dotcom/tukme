@@ -3,6 +3,8 @@
  * @see https://developers.google.com/maps/documentation/places/web-service/place-autocomplete
  */
 
+import { getGooglePlacesApiKey } from './env';
+
 const AUTOCOMPLETE_URL = 'https://places.googleapis.com/v1/places:autocomplete';
 
 const AUTOCOMPLETE_FIELD_MASK =
@@ -25,11 +27,11 @@ export type PlaceSuggestionItem = {
 };
 
 export function isPlacesConfigured(): boolean {
-  return !!process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY?.trim();
+  return getGooglePlacesApiKey().length > 0;
 }
 
 function getApiKey(): string {
-  const key = process.env.EXPO_PUBLIC_GOOGLE_PLACES_API_KEY?.trim();
+  const key = getGooglePlacesApiKey();
   if (!key) {
     throw new Error('EXPO_PUBLIC_GOOGLE_PLACES_API_KEY manquante');
   }

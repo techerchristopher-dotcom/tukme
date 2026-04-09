@@ -7,7 +7,14 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { AdminShell } from '@/components/layout/AdminShell';
 import { RequireAuth } from '@/components/auth/RequireAuth';
 import { useBusinessDate } from '@/hooks/useBusinessDate';
-import { createDriverPayout, deactivateDriver, getDriverDetail, reactivateDriver } from '@/lib/adminApi';
+import {
+  createDriverPayout,
+  deactivateDriver,
+  getDriverDetail,
+  reactivateDriver,
+  retireDriverCurrentVehicle,
+  setDriverCurrentVehicle,
+} from '@/lib/adminApi';
 import { formatAriary } from '@/lib/money';
 import type { CreateDriverPayoutInput, DriverDetailResponse } from '@/lib/types';
 import { isUuidString, normalizeUuidParam } from '@/lib/uuid';
@@ -46,6 +53,16 @@ export default function DriverDetailPage() {
   const [reactivateOpen, setReactivateOpen] = useState(false);
   const [reactivateSubmitting, setReactivateSubmitting] = useState(false);
   const [reactivateError, setReactivateError] = useState<string | null>(null);
+
+  const [vehicleRetireOpen, setVehicleRetireOpen] = useState(false);
+  const [vehicleRetireSubmitting, setVehicleRetireSubmitting] = useState(false);
+  const [vehicleRetireError, setVehicleRetireError] = useState<string | null>(null);
+
+  const [vehicleSetOpen, setVehicleSetOpen] = useState(false);
+  const [vehicleSetSubmitting, setVehicleSetSubmitting] = useState(false);
+  const [vehicleSetError, setVehicleSetError] = useState<string | null>(null);
+  const [vehicleKind, setVehicleKind] = useState('');
+  const [vehiclePlate, setVehiclePlate] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -98,6 +115,24 @@ export default function DriverDetailPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [reactivateOpen, reactivateSubmitting]);
+
+  useEffect(() => {
+    if (!vehicleRetireOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !vehicleRetireSubmitting) setVehicleRetireOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [vehicleRetireOpen, vehicleRetireSubmitting]);
+
+  useEffect(() => {
+    if (!vehicleSetOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !vehicleSetSubmitting) setVehicleSetOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [vehicleSetOpen, vehicleSetSubmitting]);
 
   const displayName = data?.driver.full_name?.trim() || 'Chauffeur';
   const isDeactivated = Boolean(data?.driver.deleted_at);
@@ -169,6 +204,46 @@ export default function DriverDetailPage() {
       return;
     }
     setReactivateOpen(false);
+    setRefreshSeq((s) => s + 1);
+  }
+
+  async function confirmRetireVehicle() {
+    if (!driverId || !isUuidString(driverId) || isDeactivated) return;
+    setVehicleRetireError(null);
+    setVehicleRetireSubmitting(true);
+    const res = await retireDriverCurrentVehicle(driverId);
+    setVehicleRetireSubmitting(false);
+    if (res.error) {
+      setVehicleRetireError(res.error.message);
+      return;
+    }
+    setVehicleRetireOpen(false);
+    setRefreshSeq((s) => s + 1);
+  }
+
+  function openVehicleSetModal() {
+    setVehicleSetError(null);
+    setVehicleKind(data?.current_vehicle?.kind?.trim() ? String(data.current_vehicle.kind) : '');
+    setVehiclePlate(data?.current_vehicle?.plate_number?.trim() ? String(data.current_vehicle.plate_number) : '');
+    setVehicleSetOpen(true);
+  }
+
+  async function submitSetVehicle(e: FormEvent) {
+    e.preventDefault();
+    if (!driverId || !isUuidString(driverId) || isDeactivated) return;
+    setVehicleSetError(null);
+    setVehicleSetSubmitting(true);
+    const res = await setDriverCurrentVehicle({
+      driverId,
+      kind: vehicleKind,
+      plate_number: vehiclePlate,
+    });
+    setVehicleSetSubmitting(false);
+    if (res.error) {
+      setVehicleSetError(res.error.message);
+      return;
+    }
+    setVehicleSetOpen(false);
     setRefreshSeq((s) => s + 1);
   }
 
@@ -347,6 +422,66 @@ export default function DriverDetailPage() {
 
             <div className="mt-6 space-y-6">
               <section className="rounded-xl border border-zinc-200 bg-white p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h2 className="text-sm font-semibold text-zinc-900">Véhicule actuel</h2>
+                    {data.current_vehicle ? (
+                      <div className="mt-2">
+                        <div className="text-base font-semibold text-zinc-900">
+                          {data.current_vehicle.kind?.trim() ? data.current_vehicle.kind : '—'}
+                        </div>
+                        <div className="mt-0.5 font-mono text-sm text-zinc-700">
+                          {data.current_vehicle.plate_number?.trim() ? data.current_vehicle.plate_number : '—'}
+                        </div>
+                        {typeof data.current_vehicle.active === 'boolean' ? (
+                          <div className="mt-2 text-xs text-zinc-600">
+                            État véhicule: {data.current_vehicle.active ? 'actif' : 'inactif'}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="mt-2 text-sm text-zinc-600">Aucun véhicule actif.</div>
+                    )}
+                  </div>
+
+                  <div className={`flex flex-wrap gap-2 ${isDeactivated ? 'pointer-events-none opacity-50' : ''}`}>
+                    {data.current_vehicle ? (
+                      <>
+                        <button
+                          type="button"
+                          className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                          disabled={vehicleSetSubmitting || vehicleRetireSubmitting}
+                          onClick={openVehicleSetModal}
+                        >
+                          Remplacer le véhicule
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-medium text-red-800 hover:bg-red-50 disabled:opacity-50"
+                          disabled={vehicleSetSubmitting || vehicleRetireSubmitting}
+                          onClick={() => {
+                            setVehicleRetireError(null);
+                            setVehicleRetireOpen(true);
+                          }}
+                        >
+                          Retirer le véhicule…
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+                        disabled={vehicleSetSubmitting || vehicleRetireSubmitting}
+                        onClick={openVehicleSetModal}
+                      >
+                        Ajouter un véhicule
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </section>
+
+              <section className="rounded-xl border border-zinc-200 bg-white p-4">
                 <h2 className="mb-3 text-sm font-semibold text-zinc-900">Courses récentes</h2>
                 <div className="overflow-x-auto">
                   <table className="min-w-full border-separate border-spacing-0 text-sm">
@@ -517,6 +652,131 @@ export default function DriverDetailPage() {
                     >
                       {deleteSubmitting ? 'Désactivation…' : 'Confirmer la désactivation'}
                     </button>
+                  </form>
+                </div>
+              </div>
+            ) : null}
+
+            {vehicleRetireOpen ? (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                role="presentation"
+                onClick={() => !vehicleRetireSubmitting && setVehicleRetireOpen(false)}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="retire-vehicle-title"
+                  className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <h2 id="retire-vehicle-title" className="text-lg font-semibold text-zinc-900">
+                    Retirer le véhicule actuel ?
+                  </h2>
+                  <p className="mt-2 text-sm text-zinc-600">
+                    Cette action clôture l’assignation active (historique conservé). Aucun véhicule n’est supprimé.
+                  </p>
+                  <p className="mt-2 text-sm font-medium text-zinc-800">
+                    {data.current_vehicle?.kind ?? '—'} ·{' '}
+                    <span className="font-mono">{data.current_vehicle?.plate_number ?? '—'}</span>
+                  </p>
+                  {vehicleRetireError ? (
+                    <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+                      {vehicleRetireError}
+                    </div>
+                  ) : null}
+                  <form
+                    className="mt-4 flex justify-end gap-2"
+                    onSubmit={(e: FormEvent) => {
+                      e.preventDefault();
+                      void confirmRetireVehicle();
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                      disabled={vehicleRetireSubmitting}
+                      onClick={() => setVehicleRetireOpen(false)}
+                    >
+                      Annuler
+                    </button>
+                    <button
+                      type="submit"
+                      className="rounded-lg border border-red-700 bg-red-700 px-3 py-2 text-sm font-medium text-white hover:bg-red-800 disabled:opacity-50"
+                      disabled={vehicleRetireSubmitting}
+                    >
+                      {vehicleRetireSubmitting ? 'Retrait…' : 'Confirmer le retrait'}
+                    </button>
+                  </form>
+                </div>
+              </div>
+            ) : null}
+
+            {vehicleSetOpen ? (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                role="presentation"
+                onClick={() => !vehicleSetSubmitting && setVehicleSetOpen(false)}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="set-vehicle-title"
+                  className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <h2 id="set-vehicle-title" className="text-lg font-semibold text-zinc-900">
+                    {data.current_vehicle ? 'Remplacer le véhicule' : 'Ajouter un véhicule'}
+                  </h2>
+                  <p className="mt-2 text-sm text-zinc-600">
+                    Cette action clôture l’assignation active si elle existe, crée un nouveau véhicule, puis assigne ce véhicule au chauffeur.
+                  </p>
+
+                  <form className="mt-4 flex flex-col gap-3" onSubmit={submitSetVehicle}>
+                    <label className="flex flex-col gap-1 text-sm">
+                      <span className="text-zinc-700">Type véhicule</span>
+                      <input
+                        className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                        value={vehicleKind}
+                        onChange={(e) => setVehicleKind(e.target.value)}
+                        required
+                        disabled={vehicleSetSubmitting}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1 text-sm">
+                      <span className="text-zinc-700">Immatriculation</span>
+                      <input
+                        className="rounded-lg border border-zinc-200 px-3 py-2 font-mono outline-none focus:border-zinc-400"
+                        value={vehiclePlate}
+                        onChange={(e) => setVehiclePlate(e.target.value)}
+                        required
+                        disabled={vehicleSetSubmitting}
+                      />
+                    </label>
+                    {vehicleSetError ? (
+                      <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+                        {vehicleSetError}
+                      </div>
+                    ) : null}
+                    <div className="mt-2 flex justify-end gap-2">
+                      <button
+                        type="button"
+                        className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                        disabled={vehicleSetSubmitting}
+                        onClick={() => setVehicleSetOpen(false)}
+                      >
+                        Annuler
+                      </button>
+                      <button
+                        type="submit"
+                        className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+                        disabled={vehicleSetSubmitting}
+                      >
+                        {vehicleSetSubmitting ? 'Enregistrement…' : 'Enregistrer'}
+                      </button>
+                    </div>
                   </form>
                 </div>
               </div>

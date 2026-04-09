@@ -8,6 +8,7 @@ import {
   ClientStripeRoot,
   useClientStripeSheet,
 } from './ClientHomeStripeBridge';
+import { getStripePublishableKey } from '../lib/env';
 import {
   type ReactNode,
   useEffect,
@@ -901,7 +902,7 @@ function ClientHomeMiddleContent(props: {
       setUiRideStatus('idle');
     }
   }, [uiRideStatus, ride?.id, ride?.status, ride]);
-  const location = useClientLocation();
+  const { location, refreshGpsOnce } = useClientLocation();
   const [searchInput, setSearchInput] = useState('');
   const [structuredDestination, setStructuredDestination] =
     useState<ClientDestination | null>(null);
@@ -1843,6 +1844,7 @@ function ClientHomeMiddleContent(props: {
       routeMetrics={routeMetrics}
       driverLat={ride?.driver_lat ?? null}
       driverLng={ride?.driver_lng ?? null}
+      onMeRecenter={Platform.OS === 'web' ? undefined : refreshGpsOnce}
     />
   );
 
@@ -1857,12 +1859,37 @@ function ClientHomeMiddleContent(props: {
       <View style={styles.awaitingPaySheet}>
         <View style={styles.awaitingPayDriverBlock}>
           <Text style={styles.awaitingPayTitle}>Chauffeur trouvé</Text>
-          <Text style={styles.awaitingPaySubtitle}>
-            {ride.driver_id
-              ? 'Votre chauffeur a accepté votre course'
-              : 'Un chauffeur a accepté votre course'}
-          </Text>
-          {/* Véhicule optionnel : pas de données fiables pour l’instant → ne pas afficher. */}
+          <View style={styles.awaitingPayDriverRow}>
+            <View style={styles.awaitingPayAvatar}>
+              <Ionicons name="person" size={18} color="#64748b" />
+            </View>
+            <View style={styles.awaitingPayDriverInfo}>
+              <Text
+                style={styles.awaitingPayDriverName}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {ride.driver_display_name?.trim() ? ride.driver_display_name.trim() : 'Chauffeur'}
+              </Text>
+              {(() => {
+                const t = ride.vehicle_type?.trim() || null;
+                const p = ride.vehicle_plate?.trim() || null;
+                const line = t && p ? `${t} • ${p}` : t ? t : p ? p : null;
+                if (!line) {
+                  return null;
+                }
+                return (
+                  <Text
+                    style={styles.awaitingPayDriverMeta}
+                    numberOfLines={1}
+                    ellipsizeMode="tail"
+                  >
+                    {line}
+                  </Text>
+                );
+              })()}
+            </View>
+          </View>
         </View>
 
         <Text style={styles.awaitingPayExplain}>
@@ -2780,7 +2807,7 @@ export function ClientHomeScreen({
   profile,
   onDevResetRole,
 }: Props) {
-  const stripePk = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY?.trim() ?? '';
+  const stripePk = getStripePublishableKey();
   const stripePublishableConfigured = stripePk.length > 0;
   const stripePublishableKey =
     stripePk ||
@@ -3947,6 +3974,39 @@ const styles = StyleSheet.create({
   },
   awaitingPayDriverBlock: {
     marginBottom: 12,
+  },
+  awaitingPayDriverRow: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  awaitingPayAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 999,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  awaitingPayDriverInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  awaitingPayDriverName: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#0f172a',
+    lineHeight: 20,
+  },
+  awaitingPayDriverMeta: {
+    marginTop: 3,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#64748b',
+    lineHeight: 18,
   },
   awaitingPayTitle: {
     fontSize: 18,

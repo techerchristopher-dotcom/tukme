@@ -1,6 +1,9 @@
 import { ActivityIndicator, Text, View } from 'react-native';
 
-import { type ClientLocationState } from '../hooks/useClientLocation';
+import {
+  type ClientLocationCoords,
+  type ClientLocationState,
+} from '../hooks/useClientLocation';
 import type { RouteMetricsUiState } from '../hooks/useRouteMetrics';
 import type { ClientDestination } from '../types/clientDestination';
 
@@ -15,6 +18,7 @@ export function ClientMapBlock(props: {
   driverLat?: number | null;
   driverLng?: number | null;
   variant?: 'card' | 'fullscreen';
+  onMeRecenter?: () => Promise<ClientLocationCoords | null>;
 }) {
   const { location, pickup, destination, routeMetrics, variant = 'card' } = props;
 
