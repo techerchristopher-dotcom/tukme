@@ -69,6 +69,7 @@ import { syncRidePaymentExpiryIfDue } from '../lib/syncRidePaymentExpiry';
 import { useActiveRide } from '../hooks/useActiveRide';
 import { formatAriary } from '../lib/taxiPricing';
 import { supabase } from '../lib/supabase';
+import { getDriverContactForRide } from '../lib/getDriverContactForRide';
 import type { ClientRideStatus } from '../types/clientRide';
 import type { ClientDestination } from '../types/clientDestination';
 import type { RidePricingEstimate } from '../types/ridePricing';
@@ -96,6 +97,274 @@ const PAYMENT_CONFIRM_POLL_MS = 1200;
 const PAYMENT_CONFIRM_MAX_WAIT_MS = 8000;
 /** Court délai pour laisser lire « Paiement confirmé » avant l’écran course. */
 const PAYMENT_CONFIRM_HOLD_AFTER_SYNC_MS = 1000;
+const DRIVER_CONTACT_LOG = '[driver-contact]';
+
+const CONFETTI_COLORS = [
+  '#60a5fa', // blue
+  '#34d399', // green
+  '#fbbf24', // amber
+  '#f472b6', // pink
+  '#a78bfa', // violet
+  '#fb7185', // rose
+];
+
+function PremiumWaitIcon(props: { size: number }) {
+  const { size } = props;
+
+  const halo = useRef(new Animated.Value(0)).current;
+  const tilt = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    halo.setValue(0);
+    tilt.setValue(0);
+
+    const haloLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(halo, {
+          toValue: 1,
+          duration: 1600,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+        Animated.timing(halo, {
+          toValue: 0,
+          duration: 1600,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    const tiltLoop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(tilt, {
+          toValue: 1,
+          duration: 1800,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+        Animated.timing(tilt, {
+          toValue: -1,
+          duration: 1800,
+          easing: Easing.inOut(Easing.sin),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    Animated.parallel([haloLoop, tiltLoop]).start();
+    return () => {
+      haloLoop.stop();
+      tiltLoop.stop();
+      halo.setValue(0);
+      tilt.setValue(0);
+    };
+  }, [halo, tilt]);
+
+  const haloScale = halo.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.88, 1.06],
+  });
+  const haloOpacity = halo.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.35, 0.08],
+  });
+  const rotate = tilt.interpolate({
+    inputRange: [-1, 1],
+    outputRange: ['-7deg', '7deg'],
+  });
+
+  return (
+    <View style={[styles.premiumWaitIconWrap, { width: size, height: size }]}>
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.premiumWaitHalo,
+          {
+            opacity: haloOpacity,
+            transform: [{ scale: haloScale }],
+          },
+        ]}
+      />
+      <Animated.View style={{ transform: [{ rotate }] }}>
+        <Ionicons name="hourglass-outline" size={size} color="#d97706" />
+      </Animated.View>
+    </View>
+  );
+}
+
+function DriverCard(props: {
+  title: string;
+  rideId: string;
+  contactEnabled?: boolean;
+  ride: {
+    driver_display_name?: string | null;
+    vehicle_type?: string | null;
+    vehicle_plate?: string | null;
+  };
+}) {
+  const { title, ride, rideId, contactEnabled = true } = props;
+  const [contactLoading, setContactLoading] = useState(false);
+
+  function normalizePhoneForWhatsApp(phone: string): string {
+    // wa.me and whatsapp://send expect digits only (E.164 without +).
+    // Keep it strict to avoid malformed URLs.
+    return phone.replace(/[^\d]/g, '');
+  }
+
+  async function openPhoneOptions() {
+    if (contactLoading) return;
+    setContactLoading(true);
+    try {
+      const res = await getDriverContactForRide(rideId);
+      if (!res.ok) {
+        Alert.alert('Appel', res.message || 'Impossible de récupérer le numéro.');
+        return;
+      }
+      if (!res.phone) {
+        Alert.alert(
+          'Appel',
+          'Le numéro du chauffeur n’est pas disponible pour le moment.'
+        );
+        return;
+      }
+
+      const phone = res.phone;
+      const waDigits = normalizePhoneForWhatsApp(phone);
+
+      Alert.alert('Contacter le chauffeur', phone, [
+        {
+          text: 'Appeler',
+          onPress: () => {
+            void Linking.openURL(`tel:${phone}`);
+          },
+        },
+        {
+          text: 'WhatsApp',
+          onPress: () => {
+            const appUrl = `whatsapp://send?phone=${waDigits}`;
+            const webUrl = `https://wa.me/${waDigits}`;
+            void (async () => {
+              try {
+                const can = await Linking.canOpenURL(appUrl);
+                if (can) {
+                  await Linking.openURL(appUrl);
+                  return;
+                }
+                await Linking.openURL(webUrl);
+              } catch {
+                Alert.alert(
+                  'WhatsApp',
+                  "Impossible d’ouvrir WhatsApp sur cet appareil."
+                );
+              }
+            })();
+          },
+        },
+        { text: 'Annuler', style: 'cancel' },
+      ]);
+    } finally {
+      setContactLoading(false);
+    }
+  }
+
+  function handlePhonePress() {
+    if (contactLoading) return;
+    Alert.alert(
+      '⚠️ Avant d’appeler',
+      'La communication avec votre chauffeur peut être difficile.\n\nParlez simplement ou faites-vous aider si besoin.\nMerci de rester courtois 🙏',
+      [
+        { text: 'Annuler', style: 'cancel' },
+        {
+          text: 'J’ai compris',
+          style: 'default',
+          onPress: () => {
+            // Petit délai pour laisser la 1ère alerte se fermer proprement.
+            setTimeout(() => void openPhoneOptions(), 120);
+          },
+        },
+      ]
+    );
+  }
+
+  return (
+    <View style={styles.awaitingPayDriverBlock}>
+      {title.trim() ? (
+        <Text style={styles.awaitingPayTitle}>{title}</Text>
+      ) : null}
+      <View style={styles.awaitingPayDriverRow}>
+        <View style={styles.awaitingPayAvatar}>
+          <Ionicons name="person" size={18} color="#64748b" />
+        </View>
+        <View style={styles.awaitingPayDriverInfo}>
+          <Text
+            style={styles.awaitingPayDriverName}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+          >
+            {ride.driver_display_name?.trim()
+              ? ride.driver_display_name.trim()
+              : 'Chauffeur'}
+          </Text>
+          {(() => {
+            const t = ride.vehicle_type?.trim() || null;
+            const p = ride.vehicle_plate?.trim() || null;
+            const line = t && p ? `${t} • ${p}` : t ? t : p ? p : null;
+            if (!line) {
+              return null;
+            }
+            return (
+              <Text
+                style={styles.awaitingPayDriverMeta}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {line}
+              </Text>
+            );
+          })()}
+        </View>
+      </View>
+
+      {contactEnabled ? (
+        <View style={styles.driverCardActionsRow}>
+          <PressableScale
+            style={styles.driverCardMessageBtn}
+            pressedStyle={styles.driverCardMessageBtnPressed}
+            onPress={() =>
+              Alert.alert('Messagerie', 'La messagerie arrivera bientôt')
+            }
+          >
+            <View style={styles.driverCardMessageIcon}>
+              <Ionicons name="chatbubble-ellipses" size={18} color="#0f172a" />
+            </View>
+            <Text style={styles.driverCardMessageText}>
+              Des infos à transmettre ?
+            </Text>
+          </PressableScale>
+
+          <PressableScale
+            style={[
+              styles.driverCardPhoneBtn,
+              contactLoading && styles.driverCardPhoneBtnDisabled,
+            ]}
+            pressedStyle={styles.driverCardPhoneBtnPressed}
+            disabledStyle={styles.driverCardPhoneBtnDisabled}
+            disabled={contactLoading}
+            onPress={handlePhonePress}
+            accessibilityLabel="Appeler le chauffeur"
+          >
+            {contactLoading ? (
+              <ActivityIndicator size="small" color="#0f172a" />
+            ) : (
+              <Ionicons name="call" size={18} color="#0f172a" />
+            )}
+          </PressableScale>
+        </View>
+      ) : null}
+    </View>
+  );
+}
 
 function clientRideStatusMessage(status: ClientRideStatus): string {
   switch (status) {
@@ -148,6 +417,92 @@ async function fetchRideOtpForClient(rideId: string): Promise<string> {
 
 function otpStorageKey(rideId: string): string {
   return `ride:otp:${rideId}`;
+}
+
+function formatDistanceMeters(meters: number | null | undefined): string {
+  if (meters == null || !Number.isFinite(meters) || meters <= 0) {
+    return '—';
+  }
+  if (meters < 1000) {
+    return `${Math.round(meters)} m`;
+  }
+  const km = meters / 1000;
+  return `${km.toFixed(km < 10 ? 1 : 0)} km`;
+}
+
+function formatDurationSeconds(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) {
+    return '—';
+  }
+  const mins = Math.max(1, Math.round(seconds / 60));
+  if (mins < 60) {
+    return `${mins} min`;
+  }
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+function ItineraryCard(props: {
+  pickupLabel: string;
+  destinationLabel: string;
+  tripDistance: string;
+  tripDuration: string;
+}) {
+  const { pickupLabel, destinationLabel, tripDistance, tripDuration } = props;
+  return (
+    <View style={styles.postPaymentItineraryCard}>
+      <Text style={styles.postPaymentItineraryTitle}>Itinéraire</Text>
+
+      <View style={styles.postPaymentItineraryBody}>
+        <View style={styles.postPaymentItineraryRail}>
+          <View style={styles.postPaymentItineraryStartDot} />
+          <View style={styles.postPaymentItineraryLine} />
+          <View style={styles.postPaymentItineraryEndDot}>
+            <Ionicons name="flag" size={14} color="#b45309" />
+          </View>
+        </View>
+
+        <View style={styles.postPaymentItineraryStops}>
+          <View style={styles.postPaymentItineraryStop}>
+            <Text style={styles.postPaymentItineraryStopLabel}>Départ</Text>
+            <Text
+              style={styles.postPaymentItineraryStopValue}
+              numberOfLines={2}
+              ellipsizeMode="tail"
+            >
+              {pickupLabel}
+            </Text>
+          </View>
+
+          <View style={styles.postPaymentItineraryStop}>
+            <Text style={styles.postPaymentItineraryStopLabel}>Arrivée</Text>
+            <Text
+              style={styles.postPaymentItineraryStopValue}
+              numberOfLines={2}
+              ellipsizeMode="tail"
+            >
+              {destinationLabel}
+            </Text>
+          </View>
+        </View>
+      </View>
+
+      <View style={styles.postPaymentItineraryMetaRow}>
+        <View style={styles.postPaymentItineraryMetaItem}>
+          <Text style={styles.postPaymentItineraryMetaLabel}>
+            Distance à parcourir
+          </Text>
+          <Text style={styles.postPaymentItineraryMetaValue}>{tripDistance}</Text>
+        </View>
+        <View style={styles.postPaymentItineraryMetaDivider} />
+        <View style={styles.postPaymentItineraryMetaItem}>
+          <Text style={styles.postPaymentItineraryMetaLabel}>Temps estimé</Text>
+          <Text style={styles.postPaymentItineraryMetaValue}>{tripDuration}</Text>
+        </View>
+      </View>
+    </View>
+  );
 }
 
 function formatCurrentPositionText(location: ClientLocationState): string {
@@ -890,6 +1245,46 @@ function ClientHomeMiddleContent(props: {
     'idle' | 'searching_driver'
   >('idle');
 
+  // Test minimaliste E2E : récupère le téléphone chauffeur via RPC (DEV only).
+  // Ne change pas l’UI : log une seule fois par rideId+status.
+  const driverContactProbeRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!__DEV__) {
+      return;
+    }
+    if (!ride?.id || !ride.driver_id) {
+      return;
+    }
+    const allowed =
+      ride.status === 'paid' ||
+      ride.status === 'en_route' ||
+      ride.status === 'arrived' ||
+      ride.status === 'in_progress';
+    if (!allowed) {
+      driverContactProbeRef.current = null;
+      return;
+    }
+
+    const key = `${ride.id}:${ride.status}`;
+    if (driverContactProbeRef.current === key) {
+      return;
+    }
+    driverContactProbeRef.current = key;
+
+    void (async () => {
+      const res = await getDriverContactForRide(ride.id);
+      if (!res.ok) {
+        console.log(`${DRIVER_CONTACT_LOG} probe`, ride.status, 'error', res.message);
+        return;
+      }
+      console.log(
+        `${DRIVER_CONTACT_LOG} probe`,
+        ride.status,
+        res.phone ? `phone=${res.phone}` : 'phone=null'
+      );
+    })();
+  }, [ride?.id, ride?.status, ride?.driver_id, ride]);
+
   useEffect(() => {
     if (ride && tab !== 'home') {
       setTab('home');
@@ -976,6 +1371,42 @@ function ClientHomeMiddleContent(props: {
     ride_completed_at: string | null;
   } | null>(null);
   const [showCompletionModal, setShowCompletionModal] = useState(false);
+
+  const completionConfetti = useRef(new Animated.Value(0)).current;
+  const confettiPieces = useMemo(() => {
+    // Stable positions/colors (avoid layout thrash on re-render).
+    const pieces = Array.from({ length: 18 }).map((_, i) => {
+      const leftPct = 6 + ((i * 89) % 88); // deterministic spread 6..94
+      const size = 6 + ((i * 7) % 8); // 6..13
+      const rotate = -25 + ((i * 31) % 50); // -25..24
+      const drift = -18 + ((i * 13) % 36); // -18..17
+      const color = CONFETTI_COLORS[i % CONFETTI_COLORS.length];
+      return { leftPct, size, rotate, drift, color };
+    });
+    return pieces;
+  }, []);
+
+  useEffect(() => {
+    if (!showCompletionModal) {
+      completionConfetti.stopAnimation();
+      completionConfetti.setValue(0);
+      return;
+    }
+    completionConfetti.setValue(0);
+    const loop = Animated.loop(
+      Animated.timing(completionConfetti, {
+        toValue: 1,
+        duration: 1800,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      })
+    );
+    loop.start();
+    return () => {
+      loop.stop();
+      completionConfetti.setValue(0);
+    };
+  }, [showCompletionModal, completionConfetti]);
 
   const sheetAnim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -2119,40 +2550,12 @@ function ClientHomeMiddleContent(props: {
   const awaitingPaymentBlock =
     !showBoltTripSummary && ride?.status === 'awaiting_payment' ? (
       <View style={styles.awaitingPaySheet}>
-        <View style={styles.awaitingPayDriverBlock}>
-          <Text style={styles.awaitingPayTitle}>Chauffeur trouvé</Text>
-          <View style={styles.awaitingPayDriverRow}>
-            <View style={styles.awaitingPayAvatar}>
-              <Ionicons name="person" size={18} color="#64748b" />
-            </View>
-            <View style={styles.awaitingPayDriverInfo}>
-              <Text
-                style={styles.awaitingPayDriverName}
-                numberOfLines={1}
-                ellipsizeMode="tail"
-              >
-                {ride.driver_display_name?.trim() ? ride.driver_display_name.trim() : 'Chauffeur'}
-              </Text>
-              {(() => {
-                const t = ride.vehicle_type?.trim() || null;
-                const p = ride.vehicle_plate?.trim() || null;
-                const line = t && p ? `${t} • ${p}` : t ? t : p ? p : null;
-                if (!line) {
-                  return null;
-                }
-                return (
-                  <Text
-                    style={styles.awaitingPayDriverMeta}
-                    numberOfLines={1}
-                    ellipsizeMode="tail"
-                  >
-                    {line}
-                  </Text>
-                );
-              })()}
-            </View>
-          </View>
-        </View>
+        <DriverCard
+          title="Chauffeur trouvé"
+          rideId={ride.id}
+          ride={ride}
+          contactEnabled={false}
+        />
 
         <Text style={styles.awaitingPayExplain}>
           Votre chauffeur attend votre paiement pour démarrer
@@ -2403,12 +2806,17 @@ function ClientHomeMiddleContent(props: {
 
   if (showPostPaymentDriverWaitView) {
     const isDriverEnRoute = ride.status === 'en_route';
-    const waitStatusLine = isDriverEnRoute
+    const primaryTitle = isDriverEnRoute
       ? 'Chauffeur en route'
-      : 'En attente du départ du chauffeur';
-    const waitHint = isDriverEnRoute
+      : 'En attente du chauffeur';
+    const subtitle = isDriverEnRoute
       ? 'Votre chauffeur se dirige vers vous'
-      : 'Le chauffeur va bientôt confirmer son départ';
+      : 'Votre chauffeur va bientôt démarrer';
+    const pickupLabel =
+      pickupForUi?.label?.trim() || ride.pickup_label?.trim() || '—';
+    const destinationLabel = destinationForUi?.label?.trim() || '—';
+    const tripDistance = formatDistanceMeters(routeMetrics.distanceMeters);
+    const tripDuration = formatDurationSeconds(routeMetrics.durationSeconds);
 
     return (
       <View style={styles.boltRoot}>
@@ -2443,47 +2851,22 @@ function ClientHomeMiddleContent(props: {
                       },
                 ]}
               >
-                <Ionicons
-                  name={isDriverEnRoute ? 'car' : 'hourglass-outline'}
-                  size={isDriverEnRoute ? 40 : 34}
-                  color={isDriverEnRoute ? '#16a34a' : '#d97706'}
-                />
+                {isDriverEnRoute ? (
+                  <Ionicons name="car" size={40} color="#16a34a" />
+                ) : (
+                  <PremiumWaitIcon size={34} />
+                )}
               </Animated.View>
-              <Text style={styles.awaitingPayTitle}>Tout est en ordre</Text>
-              <Text style={[styles.awaitingPaySubtitle, styles.paymentConfirmSubtitleSpaced]}>
-                Votre paiement est validé. Vous n’avez rien d’autre à faire pour le moment.
-              </Text>
-              <Text
-                style={[
-                  styles.postPaymentWaitStatus,
-                  isDriverEnRoute
-                    ? styles.postPaymentWaitStatusEnRoute
-                    : styles.postPaymentWaitStatusPaid,
-                ]}
-              >
-                {waitStatusLine}
-              </Text>
-              <Text
-                style={[
-                  styles.awaitingPayMuted,
-                  styles.postPaymentWaitHint,
-                  isDriverEnRoute
-                    ? styles.postPaymentWaitHintEnRoute
-                    : styles.postPaymentWaitHintPaid,
-                ]}
-              >
-                {waitHint}
-                {!isDriverEnRoute ? (
-                  <Animated.Text
-                    style={[
-                      styles.postPaymentEllipsis,
-                      { opacity: postPaymentWaitDotsOp },
-                    ]}
-                  >
-                    ...
-                  </Animated.Text>
-                ) : null}
-              </Text>
+              <Text style={styles.awaitingPayTitle}>{primaryTitle}</Text>
+              <Text style={styles.awaitingPaySubtitle}>{subtitle}</Text>
+              <DriverCard title="" rideId={ride.id} ride={ride} contactEnabled />
+
+              <ItineraryCard
+                pickupLabel={pickupLabel}
+                destinationLabel={destinationLabel}
+                tripDistance={tripDistance}
+                tripDuration={tripDuration}
+              />
             </Animated.View>
           </View>
         </SafeAreaView>
@@ -2539,6 +2922,217 @@ function ClientHomeMiddleContent(props: {
               <Text
                 style={tab === 'account' ? styles.navTextActive : styles.navText}
               >
+                Compte
+              </Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
+        <StatusBar barStyle="dark-content" />
+      </View>
+    );
+  }
+
+  const showArrivedClientView =
+    tab === 'home' && ride != null && ride.status === 'arrived';
+
+  if (showArrivedClientView) {
+    const pickupLabel =
+      pickupForUi?.label?.trim() || ride.pickup_label?.trim() || '—';
+    const destinationLabel = destinationForUi?.label?.trim() || '—';
+    const tripDistance = formatDistanceMeters(routeMetrics.distanceMeters);
+    const tripDuration = formatDurationSeconds(routeMetrics.durationSeconds);
+
+    return (
+      <View style={styles.boltRoot}>
+        {mapElement}
+        <SafeAreaView style={styles.awaitingPaySafeBottom} pointerEvents="box-none">
+          <View style={styles.awaitingPayBottomSheet}>
+            <View style={styles.sheetGrabber} />
+            <View style={[styles.awaitingPaySheet, styles.awaitingPaySheetArrived]}>
+              <View
+                style={[
+                  styles.postPaymentStateIconRing,
+                  styles.postPaymentStateIconRingArrived,
+                ]}
+              >
+                <Ionicons name="location" size={34} color="#2563eb" />
+              </View>
+              <Text style={styles.awaitingPayTitle}>Chauffeur arrivé</Text>
+              <Text style={styles.awaitingPaySubtitle}>
+                Votre chauffeur est sur place. Rejoignez-le au point de départ.
+              </Text>
+
+              <DriverCard title="" rideId={ride.id} ride={ride} contactEnabled />
+              <ItineraryCard
+                pickupLabel={pickupLabel}
+                destinationLabel={destinationLabel}
+                tripDistance={tripDistance}
+                tripDuration={tripDuration}
+              />
+            </View>
+          </View>
+        </SafeAreaView>
+        <SafeAreaView style={styles.bottomNavSafe} pointerEvents="box-none">
+          <View style={styles.bottomNav}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'home' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('home')}
+            >
+              <Ionicons
+                name={tab === 'home' ? 'home' : 'home-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'home' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'home' ? styles.navTextActive : styles.navText}>
+                Accueil
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'trips' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('trips')}
+            >
+              <Ionicons
+                name={tab === 'trips' ? 'time' : 'time-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'trips' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'trips' ? styles.navTextActive : styles.navText}>
+                Trajets
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'account' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('account')}
+            >
+              <Ionicons
+                name={tab === 'account' ? 'person' : 'person-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'account' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'account' ? styles.navTextActive : styles.navText}>
+                Compte
+              </Text>
+            </Pressable>
+          </View>
+        </SafeAreaView>
+        <StatusBar barStyle="dark-content" />
+      </View>
+    );
+  }
+
+  const showInProgressClientView =
+    tab === 'home' && ride != null && ride.status === 'in_progress';
+
+  if (showInProgressClientView) {
+    const pickupLabel =
+      pickupForUi?.label?.trim() || ride.pickup_label?.trim() || '—';
+    const destinationLabel = destinationForUi?.label?.trim() || '—';
+    const tripDistance = formatDistanceMeters(routeMetrics.distanceMeters);
+    const tripDuration = formatDurationSeconds(routeMetrics.durationSeconds);
+
+    return (
+      <View style={styles.boltRoot}>
+        {mapElement}
+        <SafeAreaView style={styles.awaitingPaySafeBottom} pointerEvents="box-none">
+          <View style={styles.awaitingPayBottomSheet}>
+            <View style={styles.sheetGrabber} />
+            <View style={[styles.awaitingPaySheet, styles.awaitingPaySheetInProgress]}>
+              <View
+                style={[
+                  styles.postPaymentStateIconRing,
+                  styles.postPaymentStateIconRingInProgress,
+                ]}
+              >
+                <Ionicons name="navigate" size={34} color="#4f46e5" />
+              </View>
+              <Text style={styles.awaitingPayTitle}>Course en cours</Text>
+              <Text style={styles.awaitingPaySubtitle}>
+                Votre course a commencé. À la fin du trajet, donnez le code OTP au chauffeur.
+              </Text>
+
+              <View style={styles.otpCard}>
+                <Text style={styles.otpLabel}>Code OTP (fin de course)</Text>
+                {rideOtp ? (
+                  <Text style={styles.otpValue}>{rideOtp}</Text>
+                ) : rideOtpError ? (
+                  <Text style={styles.otpError}>{rideOtpError}</Text>
+                ) : (
+                  <Text style={styles.otpLoading}>Chargement du code…</Text>
+                )}
+              </View>
+
+              <DriverCard title="" rideId={ride.id} ride={ride} contactEnabled />
+              <ItineraryCard
+                pickupLabel={pickupLabel}
+                destinationLabel={destinationLabel}
+                tripDistance={tripDistance}
+                tripDuration={tripDuration}
+              />
+            </View>
+          </View>
+        </SafeAreaView>
+        <SafeAreaView style={styles.bottomNavSafe} pointerEvents="box-none">
+          <View style={styles.bottomNav}>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'home' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('home')}
+            >
+              <Ionicons
+                name={tab === 'home' ? 'home' : 'home-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'home' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'home' ? styles.navTextActive : styles.navText}>
+                Accueil
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'trips' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('trips')}
+            >
+              <Ionicons
+                name={tab === 'trips' ? 'time' : 'time-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'trips' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'trips' ? styles.navTextActive : styles.navText}>
+                Trajets
+              </Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [
+                styles.navItem,
+                pressed && styles.navItemPressed,
+                tab === 'account' && styles.navItemActive,
+              ]}
+              onPress={() => setTab('account')}
+            >
+              <Ionicons
+                name={tab === 'account' ? 'person' : 'person-outline'}
+                size={NAV_ICON_SIZE}
+                color={tab === 'account' ? BRAND_PRIMARY : ICON_INACTIVE}
+              />
+              <Text style={tab === 'account' ? styles.navTextActive : styles.navText}>
                 Compte
               </Text>
             </Pressable>
@@ -2683,29 +3277,49 @@ function ClientHomeMiddleContent(props: {
           onPress={() => resetAfterRide('home')}
         >
           <Pressable style={styles.modalCard} onPress={() => undefined}>
-            <Text style={styles.modalTitle}>Course terminée</Text>
-            <Text style={styles.modalRoute} numberOfLines={3}>
-              {(terminalSummary?.pickup_label?.trim() || pickupForUi?.label || 'Départ') +
-                ' → ' +
-                (terminalSummary?.destination_label?.trim() || destinationForUi?.label || 'Destination')}
-            </Text>
-            <Text style={styles.modalLine}>
-              Estimation :{' '}
-              {terminalSummary?.estimated_price_eur != null &&
-              Number.isFinite(terminalSummary.estimated_price_eur)
-                ? `${terminalSummary.estimated_price_eur.toFixed(2)} €`
-                : '—'}
-            </Text>
-            <Text style={styles.modalLine}>
+            <View style={styles.modalConfettiLayer} pointerEvents="none">
               {(() => {
-                const raw = terminalSummary?.ride_completed_at?.trim();
-                const ms = raw ? Date.parse(raw) : NaN;
-                const d = Number.isFinite(ms) ? new Date(ms) : new Date();
-                return `Terminée le ${d.toLocaleString('fr-FR', {
-                  dateStyle: 'medium',
-                  timeStyle: 'short',
-                })}`;
+                const h = 220;
+                const y = completionConfetti.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [-40, h],
+                });
+                const op = completionConfetti.interpolate({
+                  inputRange: [0, 0.08, 0.85, 1],
+                  outputRange: [0, 1, 1, 0],
+                });
+                return confettiPieces.map((p, idx) => (
+                  <Animated.View
+                    key={idx}
+                    style={[
+                      styles.modalConfettiPiece,
+                      {
+                        left: `${p.leftPct}%`,
+                        width: p.size,
+                        height: Math.max(6, Math.round(p.size * 1.4)),
+                        backgroundColor: p.color,
+                        opacity: op,
+                        transform: [
+                          { translateY: y },
+                          { translateX: p.drift },
+                          { rotate: `${p.rotate}deg` },
+                        ],
+                      },
+                    ]}
+                  />
+                ));
               })()}
+            </View>
+
+            <View style={styles.modalArrivalRing}>
+              <Ionicons name="flag" size={22} color="#b45309" />
+            </View>
+            <Text style={styles.modalCelebrationTitle}>Félicitations</Text>
+            <Text style={styles.modalCelebrationSubtitle}>
+              Vous êtes arrivé à destination
+            </Text>
+            <Text style={styles.modalCelebrationBody}>
+              Votre course est terminée. Merci d’avoir voyagé avec Tukme.
             </Text>
 
             <View style={styles.modalButtons}>
@@ -2714,18 +3328,16 @@ function ClientHomeMiddleContent(props: {
                   styles.modalBtnSecondary,
                   pressed && styles.modalBtnPressed,
                 ]}
-                onPress={() => resetAfterRide('home')}
+                onPress={() =>
+                  Alert.alert(
+                    'Pourboire',
+                    'Cette fonctionnalité arrive bientôt'
+                  )
+                }
               >
-                <Text style={styles.modalBtnSecondaryText}>Fermer</Text>
-              </Pressable>
-              <Pressable
-                style={({ pressed }) => [
-                  styles.modalBtnSecondary,
-                  pressed && styles.modalBtnPressed,
-                ]}
-                onPress={() => resetAfterRide('trips')}
-              >
-                <Text style={styles.modalBtnSecondaryText}>Voir mes courses</Text>
+                <Text style={styles.modalBtnSecondaryText}>
+                  Laisser un pourboire
+                </Text>
               </Pressable>
               <Pressable
                 style={({ pressed }) => [
@@ -2734,7 +3346,7 @@ function ClientHomeMiddleContent(props: {
                 ]}
                 onPress={() => resetAfterRide('home')}
               >
-                <Text style={styles.modalBtnPrimaryText}>Commander à nouveau</Text>
+                <Text style={styles.modalBtnPrimaryText}>Fermer</Text>
               </Pressable>
             </View>
           </Pressable>
@@ -4112,6 +4724,56 @@ const styles = StyleSheet.create({
     marginTop: 12,
     gap: 10,
   },
+  modalConfettiLayer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 220,
+    overflow: 'hidden',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+  },
+  modalConfettiPiece: {
+    position: 'absolute',
+    top: 0,
+    borderRadius: 3,
+  },
+  modalArrivalRing: {
+    alignSelf: 'center',
+    width: 56,
+    height: 56,
+    borderRadius: 999,
+    backgroundColor: '#fef3c7',
+    borderWidth: 1,
+    borderColor: '#fde68a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+    marginBottom: 10,
+  },
+  modalCelebrationTitle: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: '#0f172a',
+    textAlign: 'center',
+    letterSpacing: -0.4,
+  },
+  modalCelebrationSubtitle: {
+    marginTop: 6,
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0f172a',
+    textAlign: 'center',
+  },
+  modalCelebrationBody: {
+    marginTop: 10,
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 18,
+  },
   modalBtnPrimary: {
     backgroundColor: '#0f766e',
     borderRadius: 12,
@@ -4493,6 +5155,20 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     letterSpacing: 0.5,
   },
+  premiumWaitIconWrap: {
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  premiumWaitHalo: {
+    position: 'absolute',
+    top: -8,
+    left: -8,
+    right: -8,
+    bottom: -8,
+    borderRadius: 999,
+    backgroundColor: '#f59e0b', // halo ambre
+  },
   postPaymentStateIconRing: {
     alignSelf: 'center',
     width: 76,
@@ -4508,11 +5184,23 @@ const styles = StyleSheet.create({
   postPaymentStateIconRingEnRoute: {
     backgroundColor: '#dcfce7',
   },
+  postPaymentStateIconRingArrived: {
+    backgroundColor: '#dbeafe',
+  },
+  postPaymentStateIconRingInProgress: {
+    backgroundColor: '#eef2ff',
+  },
   awaitingPaySheetPostWait: {
     borderColor: '#fcd34d',
   },
   awaitingPaySheetPostEnRoute: {
     borderColor: '#86efac',
+  },
+  awaitingPaySheetArrived: {
+    borderColor: '#93c5fd',
+  },
+  awaitingPaySheetInProgress: {
+    borderColor: '#c7d2fe',
   },
   awaitingPaySheet: {
     marginTop: 12,
@@ -4530,6 +5218,43 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+  },
+  otpCard: {
+    marginTop: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#fff',
+    padding: 14,
+    alignItems: 'center',
+  },
+  otpLabel: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#64748b',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  otpValue: {
+    marginTop: 10,
+    fontSize: 34,
+    fontWeight: '900',
+    color: '#0f172a',
+    letterSpacing: 2,
+    fontVariant: ['tabular-nums'],
+  },
+  otpLoading: {
+    marginTop: 10,
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#64748b',
+  },
+  otpError: {
+    marginTop: 10,
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#b91c1c',
+    textAlign: 'center',
   },
   awaitingPayAvatar: {
     width: 44,
@@ -4557,6 +5282,160 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: '#64748b',
     lineHeight: 18,
+  },
+  driverCardActionsRow: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  driverCardMessageBtn: {
+    flex: 1,
+    height: 46,
+    borderRadius: 999,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  driverCardMessageBtnPressed: {
+    opacity: 0.9,
+    backgroundColor: '#e2e8f0',
+  },
+  driverCardMessageIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 999,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  driverCardMessageText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#475569',
+  },
+  driverCardPhoneBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: 999,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  driverCardPhoneBtnPressed: {
+    opacity: 0.9,
+    backgroundColor: '#e2e8f0',
+  },
+  driverCardPhoneBtnDisabled: {
+    opacity: 0.65,
+  },
+  postPaymentItineraryCard: {
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 16,
+    backgroundColor: '#fff',
+    padding: 14,
+  },
+  postPaymentItineraryTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#0f172a',
+    letterSpacing: -0.1,
+  },
+  postPaymentItineraryBody: {
+    marginTop: 12,
+    flexDirection: 'row',
+    gap: 12,
+  },
+  postPaymentItineraryRail: {
+    width: 18,
+    alignItems: 'center',
+    paddingTop: 2,
+  },
+  postPaymentItineraryStartDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: '#16a34a',
+  },
+  postPaymentItineraryLine: {
+    marginTop: 6,
+    marginBottom: 6,
+    width: 2,
+    flex: 1,
+    borderRadius: 2,
+    backgroundColor: '#e5e7eb',
+  },
+  postPaymentItineraryEndDot: {
+    width: 18,
+    height: 18,
+    borderRadius: 999,
+    backgroundColor: '#fef3c7',
+    borderWidth: 1,
+    borderColor: '#fde68a',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  postPaymentItineraryStops: {
+    flex: 1,
+    minWidth: 0,
+    gap: 14,
+  },
+  postPaymentItineraryStop: {
+    minWidth: 0,
+  },
+  postPaymentItineraryStopLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#64748b',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  postPaymentItineraryStopValue: {
+    marginTop: 4,
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0f172a',
+    lineHeight: 18,
+  },
+  postPaymentItineraryMetaRow: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    borderRadius: 12,
+    backgroundColor: '#f8fafc',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    overflow: 'hidden',
+  },
+  postPaymentItineraryMetaItem: {
+    flex: 1,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  postPaymentItineraryMetaDivider: {
+    width: 1,
+    backgroundColor: '#e5e7eb',
+  },
+  postPaymentItineraryMetaLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#64748b',
+  },
+  postPaymentItineraryMetaValue: {
+    marginTop: 4,
+    fontSize: 14,
+    fontWeight: '900',
+    color: '#0f172a',
   },
   awaitingPayTitle: {
     fontSize: 18,
