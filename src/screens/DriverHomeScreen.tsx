@@ -51,13 +51,14 @@ type AssignedRideRow = {
   passenger_count: number;
   status: string;
   payment_expires_at: string | null;
+  payment_method: 'card' | 'cash' | null;
 };
 
 const SELECT_OPEN =
   'id, destination_label, pickup_label, estimated_price_ariary, passenger_count, created_at, status';
 
 const SELECT_ASSIGNED =
-  'id, destination_label, estimated_price_ariary, passenger_count, status, payment_expires_at, updated_at';
+  'id, destination_label, estimated_price_ariary, passenger_count, status, payment_expires_at, payment_method, updated_at';
 
 function formatAr(ariary: number | null): string {
   if (ariary == null || !Number.isFinite(ariary)) {
@@ -66,12 +67,18 @@ function formatAr(ariary: number | null): string {
   return `${formatAriary(Math.round(ariary))} Ar`;
 }
 
-function driverAssignmentStatusMessage(status: string): string {
+function driverAssignmentStatusMessage(
+  status: string,
+  paymentMethod: 'card' | 'cash' | null | undefined
+): string {
+  const pm = paymentMethod ?? 'card';
   switch (status) {
     case 'awaiting_payment':
       return 'En attente de paiement client';
     case 'paid':
-      return 'Paiement reçu — vous pouvez partir.';
+      return pm === 'cash'
+        ? 'Paiement en espèces à récupérer — vous pouvez partir.'
+        : 'Paiement reçu — vous pouvez partir.';
     case 'en_route':
       return 'En route vers le client';
     case 'arrived':
@@ -385,7 +392,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
             Passagers : {r.passenger_count ?? 1}
           </Text>
           <Text style={styles.assignmentStatus}>
-            {driverAssignmentStatusMessage(r.status)}
+            {driverAssignmentStatusMessage(r.status, r.payment_method)}
           </Text>
           {r.status === 'awaiting_payment' && r.payment_expires_at ? (
             <Text style={styles.expiresHint} numberOfLines={1}>

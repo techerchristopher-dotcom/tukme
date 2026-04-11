@@ -143,7 +143,7 @@ Deno.serve(async (req) => {
     const { data: ride, error: rideErr } = await admin
       .from('rides')
       .select(
-        'id, client_id, status, estimated_price_eur, destination_label, payment_expires_at'
+        'id, client_id, status, estimated_price_eur, destination_label, payment_expires_at, payment_method'
       )
       .eq('id', rideId)
       .maybeSingle();
@@ -173,6 +173,37 @@ Deno.serve(async (req) => {
       return new Response(
         JSON.stringify({ error: 'Ride is not awaiting payment' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const payMethod = String((ride as { payment_method?: string }).payment_method ?? 'card');
+    if (payMethod === 'cash') {
+      console.error(`${LOG} cash ride, no PaymentIntent`, { rideId });
+      return new Response(
+        JSON.stringify({
+          error:
+            'Cette course est en paiement espèces. Aucun paiement par carte n’est nécessaire.',
+        }),
+        { status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const { data: cashRow } = await admin
+      .from('payments')
+      .select('id')
+      .eq('ride_id', rideId)
+      .eq('provider', 'cash')
+      .eq('status', 'pending_collection')
+      .maybeSingle();
+
+    if (cashRow) {
+      console.error(`${LOG} cash payment row exists`, { rideId });
+      return new Response(
+        JSON.stringify({
+          error:
+            'Un paiement espèces est déjà enregistré pour cette course. Utilisez le flux espèces.',
+        }),
+        { status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 

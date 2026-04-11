@@ -1,3 +1,6 @@
+/** Colonne `rides.payment_method` (enum PostgreSQL). */
+export type RidePaymentMethod = 'card' | 'cash';
+
 /** Statuts `public.ride_status` (aligné schéma Supabase). */
 export type ClientRideStatus =
   | 'requested'
@@ -43,6 +46,8 @@ export type ClientRideSnapshot = {
   passenger_count: number;
   /** Estimation EUR persistée (paiement Edge Function). */
   estimated_price_eur: number | null;
+  /** Mode de paiement choisi (défaut `card` côté hydrate si absent). */
+  payment_method: RidePaymentMethod;
   /** Fin de fenêtre de paiement (UTC, ISO) ; défini une seule fois côté serveur. */
   payment_expires_at: string | null;
   /** Horodatage fin de course (UTC ISO), si complétée. */

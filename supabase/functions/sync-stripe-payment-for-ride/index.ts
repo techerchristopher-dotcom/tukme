@@ -75,7 +75,7 @@ Deno.serve(async (req) => {
 
     const { data: ride, error: rideErr } = await admin
       .from('rides')
-      .select('id, client_id, status')
+      .select('id, client_id, status, payment_method')
       .eq('id', rideId)
       .maybeSingle();
 
@@ -88,6 +88,13 @@ Deno.serve(async (req) => {
     if (ride.client_id !== user.id) {
       return new Response(JSON.stringify({ error: 'Forbidden' }), {
         status: 403,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    if (String((ride as { payment_method?: string }).payment_method ?? 'card') === 'cash') {
+      return new Response(JSON.stringify({ ok: true, skipped: 'cash_payment' }), {
+        status: 200,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }

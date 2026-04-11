@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { supabase, syncRealtimeAuth } from '../lib/supabase';
-import type { ClientRideSnapshot, ClientRideStatus } from '../types/clientRide';
+import type {
+  ClientRideSnapshot,
+  ClientRideStatus,
+  RidePaymentMethod,
+} from '../types/clientRide';
 
 const LOG = '[ride-realtime]';
 
 const RIDE_SELECT_COLUMNS =
-  'id, status, driver_id, updated_at, driver_lat, driver_lng, driver_location_updated_at, driver_display_name, driver_avatar_path, vehicle_type, vehicle_plate, pickup_label, destination_label, destination_lat, destination_lng, destination_place_id, passenger_count, estimated_price_eur, payment_expires_at, ride_completed_at';
+  'id, status, driver_id, updated_at, driver_lat, driver_lng, driver_location_updated_at, driver_display_name, driver_avatar_path, vehicle_type, vehicle_plate, pickup_label, destination_label, destination_lat, destination_lng, destination_place_id, passenger_count, estimated_price_eur, payment_method, payment_expires_at, ride_completed_at';
 
 const OPEN_STATUSES: ClientRideStatus[] = [
   'requested',
@@ -189,6 +193,15 @@ function buildRideSnapshot(
     estimated_price_eur = pe ?? null;
   }
 
+  let payment_method: RidePaymentMethod;
+  if (row.payment_method === undefined) {
+    payment_method = prev?.payment_method ?? 'card';
+  } else if (row.payment_method === 'cash') {
+    payment_method = 'cash';
+  } else {
+    payment_method = 'card';
+  }
+
   let payment_expires_at: string | null;
   if (row.payment_expires_at === undefined) {
     payment_expires_at = prev?.payment_expires_at ?? null;
@@ -241,6 +254,7 @@ function buildRideSnapshot(
     destination_place_id: destPlace,
     passenger_count,
     estimated_price_eur,
+    payment_method,
     payment_expires_at,
     ride_completed_at,
   };

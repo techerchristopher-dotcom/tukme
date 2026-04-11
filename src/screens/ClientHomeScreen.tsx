@@ -66,11 +66,13 @@ import { syncStripePaymentForRide } from '../lib/syncStripePaymentForRide';
 import { insertRequestedRide } from '../lib/createRide';
 import { notifyRideEvent } from '../lib/pushNotifications';
 import { syncRidePaymentExpiryIfDue } from '../lib/syncRidePaymentExpiry';
+import { selectCashPaymentForRide } from '../lib/selectCashPaymentForRide';
+import { switchPaymentMethodForRide } from '../lib/switchPaymentMethodForRide';
 import { useActiveRide } from '../hooks/useActiveRide';
 import { formatAriary } from '../lib/taxiPricing';
 import { supabase } from '../lib/supabase';
 import { getDriverContactForRide } from '../lib/getDriverContactForRide';
-import type { ClientRideStatus } from '../types/clientRide';
+import type { ClientRideStatus, RidePaymentMethod } from '../types/clientRide';
 import type { ClientDestination } from '../types/clientDestination';
 import type { RidePricingEstimate } from '../types/ridePricing';
 import type { Profile } from '../types/profile';
@@ -1354,6 +1356,10 @@ function ClientHomeMiddleContent(props: {
   const searchHydratedForRideIdRef = useRef<string | null>(null);
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [paymentSheetLoading, setPaymentSheetLoading] = useState(false);
+  const [cashSelecting, setCashSelecting] = useState(false);
+  const [payMethodSwitching, setPayMethodSwitching] = useState(false);
+  const [selectedPaymentMethod, setSelectedPaymentMethod] =
+    useState<RidePaymentMethod>('card');
   /** Après succès Payment Sheet : écran intermédiaire puis sync statut ride. */
   const [paymentConfirmPending, setPaymentConfirmPending] = useState(false);
   const [paymentConfirmSyncTimedOut, setPaymentConfirmSyncTimedOut] =
@@ -2371,6 +2377,134 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
+  useEffect(() => {
+    if (!ride?.id || ride.status !== 'awaiting_payment') {
+      return;
+    }
+    // MVP safe : défaut historique = card. Si la DB a déjà une valeur, on s’aligne dessus.
+    setSelectedPaymentMethod(ride.payment_method ?? 'card');
+  }, [ride?.id, ride?.status, ride?.payment_method]);
+
+  async function handleAwaitingPaymentPayPress() {
+    if (!ride || ride.status !== 'awaiting_payment') {
+      return;
+    }
+    if (paymentInFlightRef.current || paymentSheetLoading || cashSelecting) {
+      return;
+    }
+
+    const rideId = ride.id;
+    const deadline = ride.payment_expires_at ? Date.parse(ride.payment_expires_at) : NaN;
+    if (Number.isFinite(deadline) && Date.now() >= deadline) {
+      setPaymentError('Le délai de paiement est dépassé.');
+      void syncRidePaymentExpiryIfDue(rideId);
+      return;
+    }
+
+    if (selectedPaymentMethod === 'card') {
+      // Si l’utilisateur revient vers carte après avoir tenté cash, neutralise le cash pending.
+      if (ride.payment_method !== 'card') {
+        setPaymentError(null);
+        setPayMethodSwitching(true);
+        try {
+          const sw = await switchPaymentMethodForRide(rideId, 'card');
+          if (!sw.ok) {
+            setPaymentError(sw.message);
+            return;
+          }
+          void refetchOpenRide();
+        } finally {
+          setPayMethodSwitching(false);
+        }
+      }
+
+      await handlePayPress();
+      return;
+    }
+
+    // cash: neutralise un éventuel Stripe "open" avant de sélectionner le cash
+    if (ride.payment_method !== 'cash') {
+      setPaymentError(null);
+      setPayMethodSwitching(true);
+      try {
+        const sw = await switchPaymentMethodForRide(rideId, 'cash');
+        if (!sw.ok) {
+          setPaymentError(sw.message);
+          return;
+        }
+        void refetchOpenRide();
+      } finally {
+        setPayMethodSwitching(false);
+      }
+    }
+
+    paymentInFlightRef.current = true;
+    setPaymentError(null);
+    setCashSelecting(true);
+    try {
+      const res = await selectCashPaymentForRide(rideId);
+      if (!res.ok) {
+        setPaymentError(res.message);
+        return;
+      }
+      // La ride passe à `paid` via RPC : Realtime devrait suivre, mais on force un refetch pour UX.
+      void refetchOpenRide();
+    } finally {
+      paymentInFlightRef.current = false;
+      setCashSelecting(false);
+    }
+  }
+
+  function requestPaymentMethodSwitch(next: RidePaymentMethod) {
+    if (next === selectedPaymentMethod) {
+      return;
+    }
+    if (!ride || ride.status !== 'awaiting_payment') {
+      setSelectedPaymentMethod(next);
+      return;
+    }
+    if (paymentSheetLoading || cashSelecting || payMethodSwitching) {
+      return;
+    }
+
+    const hasChange =
+      (ride.payment_method ?? 'card') !== next;
+    if (!hasChange) {
+      setSelectedPaymentMethod(next);
+      return;
+    }
+
+    const title = 'Changer de mode de paiement ?';
+    const body =
+      next === 'cash'
+        ? 'Vous avez peut-être déjà commencé un paiement par carte. Il sera annulé pour cette course.'
+        : 'Vous aviez choisi les espèces. Cette sélection sera annulée pour cette course.';
+
+    Alert.alert(title, body, [
+      { text: 'Annuler', style: 'cancel' },
+      {
+        text: 'Confirmer',
+        style: 'default',
+        onPress: () =>
+          void (async () => {
+            setPayMethodSwitching(true);
+            setPaymentError(null);
+            try {
+              const sw = await switchPaymentMethodForRide(ride.id, next);
+              if (!sw.ok) {
+                setPaymentError(sw.message);
+                return;
+              }
+              setSelectedPaymentMethod(next);
+              void refetchOpenRide();
+            } finally {
+              setPayMethodSwitching(false);
+            }
+          })(),
+      },
+    ]);
+  }
+
   async function handlePickSuggestion(item: PlaceSuggestionItem) {
     Keyboard.dismiss();
     if (configError) {
@@ -2549,76 +2683,142 @@ function ClientHomeMiddleContent(props: {
 
   const awaitingPaymentBlock =
     !showBoltTripSummary && ride?.status === 'awaiting_payment' ? (
-      <View style={styles.awaitingPaySheet}>
-        <DriverCard
-          title="Chauffeur trouvé"
-          rideId={ride.id}
-          ride={ride}
-          contactEnabled={false}
-        />
+      <View style={styles.awaitingPaySheetStack}>
+        {/* Carte 1 — Chauffeur / état attente */}
+        <View style={styles.awaitingPaySheet}>
+          <Text style={styles.awaitingPayTitle}>Réservation en attente</Text>
+          <DriverCard
+            title=""
+            rideId={ride.id}
+            ride={ride}
+            contactEnabled={false}
+          />
+          <Text style={styles.awaitingPayExplain}>
+            Votre chauffeur attend votre paiement pour démarrer
+          </Text>
+          <Text style={styles.awaitingPayTimer}>
+            Réservation en attente • {paymentCountdownMmSs ?? '--:--'}
+          </Text>
+        </View>
 
-        <Text style={styles.awaitingPayExplain}>
-          Votre chauffeur attend votre paiement pour démarrer
-        </Text>
+        {/* Carte 2 — Paiement */}
+        <View style={styles.awaitingPaySheet}>
+          <Text style={styles.paymentMethodTitle}>Mode de paiement</Text>
 
-        <Text style={styles.awaitingPayTimer}>
-          Réservation en attente • {paymentCountdownMmSs ?? '--:--'}
-        </Text>
-
-        {/* Pas de microcopy supplémentaire ici : le timer + le CTA suffisent. */}
-
-        {ride?.status === 'awaiting_payment' &&
-        (!ride.payment_expires_at || !paymentWindowExpired) ? (
-          Platform.OS === 'web' ? (
-            <Text style={styles.awaitingPayMuted}>
-              Le paiement sécurisé est disponible sur l’application mobile
-              (iOS/Android), pas dans le navigateur.
-            </Text>
-          ) : (
+          <View style={styles.paymentMethodOptionsRow}>
             <PressableScale
               style={[
-                styles.awaitingPayPrimaryBtn,
-                paymentSheetLoading && styles.awaitingPayPrimaryBtnDisabled,
+                styles.paymentMethodOption,
+                selectedPaymentMethod === 'cash' && styles.paymentMethodOptionSelected,
               ]}
-              pressedStyle={styles.awaitingPayPrimaryBtnPressed}
-              disabledStyle={styles.awaitingPayPrimaryBtnDisabled}
-              onPress={() => void handlePayPress()}
-              disabled={paymentSheetLoading}
+              pressedStyle={styles.paymentMethodOptionPressed}
+              onPress={() => requestPaymentMethodSwitch('cash')}
+              disabled={paymentSheetLoading || cashSelecting || payMethodSwitching}
             >
-              {paymentSheetLoading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.awaitingPayPrimaryBtnText}>
-                  Payer{' '}
-                  {ride.estimated_price_eur != null &&
-                  Number.isFinite(ride.estimated_price_eur)
-                    ? `${ride.estimated_price_eur.toFixed(2)} €`
-                    : '—'}
+              <View
+                style={[
+                  styles.paymentMethodRadio,
+                  selectedPaymentMethod === 'cash' && styles.paymentMethodRadioSelected,
+                ]}
+              >
+                {selectedPaymentMethod === 'cash' ? (
+                  <View style={styles.paymentMethodRadioDot} />
+                ) : null}
+              </View>
+              <View style={styles.paymentMethodOptionTextCol}>
+                <Text style={styles.paymentMethodOptionLabel}>Espèces</Text>
+                <Text style={styles.paymentMethodOptionHint}>
+                  Paiement au chauffeur
                 </Text>
-              )}
+              </View>
+              <Ionicons name="cash-outline" size={18} color="#0f172a" />
             </PressableScale>
-          )
-        ) : null}
 
-        {paymentError ? <Text style={styles.orderError}>{paymentError}</Text> : null}
+            <PressableScale
+              style={[
+                styles.paymentMethodOption,
+                selectedPaymentMethod === 'card' && styles.paymentMethodOptionSelected,
+              ]}
+              pressedStyle={styles.paymentMethodOptionPressed}
+              onPress={() => requestPaymentMethodSwitch('card')}
+              disabled={paymentSheetLoading || cashSelecting || payMethodSwitching}
+            >
+              <View
+                style={[
+                  styles.paymentMethodRadio,
+                  selectedPaymentMethod === 'card' && styles.paymentMethodRadioSelected,
+                ]}
+              >
+                {selectedPaymentMethod === 'card' ? (
+                  <View style={styles.paymentMethodRadioDot} />
+                ) : null}
+              </View>
+              <View style={styles.paymentMethodOptionTextCol}>
+                <Text style={styles.paymentMethodOptionLabel}>Carte bancaire</Text>
+                <Text style={styles.paymentMethodOptionHint}>
+                  Paiement sécurisé
+                </Text>
+              </View>
+              <Ionicons name="card-outline" size={18} color="#0f172a" />
+            </PressableScale>
+          </View>
 
-        <Pressable
-          style={({ pressed }) => [
-            styles.awaitingPayCancelBtn,
-            cancelLoading && styles.orderButtonDisabled,
-            pressed && !cancelLoading && styles.awaitingPayCancelBtnPressed,
-          ]}
-          disabled={cancelLoading}
-          onPress={() => void handleCancelPress()}
-        >
-          {cancelLoading ? (
-            <ActivityIndicator color="#0f766e" />
-          ) : (
-            <Text style={styles.awaitingPayCancelText}>Annuler la course</Text>
-          )}
-        </Pressable>
+          {ride?.status === 'awaiting_payment' &&
+          (!ride.payment_expires_at || !paymentWindowExpired) ? (
+            Platform.OS === 'web' && selectedPaymentMethod === 'card' ? (
+              <Text style={styles.awaitingPayMuted}>
+                Le paiement sécurisé est disponible sur l’application mobile
+                (iOS/Android), pas dans le navigateur.
+              </Text>
+            ) : (
+              <PressableScale
+                style={[
+                  styles.awaitingPayPrimaryBtn,
+                  (paymentSheetLoading || cashSelecting || payMethodSwitching) &&
+                    styles.awaitingPayPrimaryBtnDisabled,
+                ]}
+                pressedStyle={styles.awaitingPayPrimaryBtnPressed}
+                disabledStyle={styles.awaitingPayPrimaryBtnDisabled}
+                onPress={() => void handleAwaitingPaymentPayPress()}
+                disabled={paymentSheetLoading || cashSelecting || payMethodSwitching}
+              >
+                {paymentSheetLoading || cashSelecting || payMethodSwitching ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.awaitingPayPrimaryBtnText}>
+                    Payer{' '}
+                    {ride.estimated_price_eur != null &&
+                    Number.isFinite(ride.estimated_price_eur)
+                      ? `${ride.estimated_price_eur.toFixed(2)} €`
+                      : '—'}
+                  </Text>
+                )}
+              </PressableScale>
+            )
+          ) : null}
 
-        {cancelError ? <Text style={styles.orderError}>{cancelError}</Text> : null}
+          {paymentError ? (
+            <Text style={styles.orderError}>{paymentError}</Text>
+          ) : null}
+
+          <Pressable
+            style={({ pressed }) => [
+              styles.awaitingPayCancelBtn,
+              cancelLoading && styles.orderButtonDisabled,
+              pressed && !cancelLoading && styles.awaitingPayCancelBtnPressed,
+            ]}
+            disabled={cancelLoading}
+            onPress={() => void handleCancelPress()}
+          >
+            {cancelLoading ? (
+              <ActivityIndicator color="#0f766e" />
+            ) : (
+              <Text style={styles.awaitingPayCancelText}>Annuler la course</Text>
+            )}
+          </Pressable>
+
+          {cancelError ? <Text style={styles.orderError}>{cancelError}</Text> : null}
+        </View>
       </View>
     ) : null;
 
@@ -5209,6 +5409,73 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#e5e7eb',
     padding: 16,
+  },
+  awaitingPaySheetStack: {
+    marginTop: 12,
+    gap: 12,
+  },
+  paymentMethodTitle: {
+    fontSize: 13,
+    fontWeight: '900',
+    color: '#0f172a',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  paymentMethodOptionsRow: {
+    marginTop: 12,
+    gap: 10,
+  },
+  paymentMethodOption: {
+    minHeight: 54,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#fff',
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  paymentMethodOptionSelected: {
+    borderColor: '#99f6e4',
+    backgroundColor: '#f0fdfa',
+  },
+  paymentMethodOptionPressed: {
+    opacity: 0.92,
+  },
+  paymentMethodRadio: {
+    width: 20,
+    height: 20,
+    borderRadius: 999,
+    borderWidth: 2,
+    borderColor: '#cbd5e1',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  paymentMethodRadioSelected: {
+    borderColor: BRAND_PRIMARY,
+  },
+  paymentMethodRadioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: BRAND_PRIMARY,
+  },
+  paymentMethodOptionTextCol: {
+    flex: 1,
+    minWidth: 0,
+  },
+  paymentMethodOptionLabel: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#0f172a',
+  },
+  paymentMethodOptionHint: {
+    marginTop: 2,
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748b',
   },
   awaitingPayDriverBlock: {
     marginBottom: 12,

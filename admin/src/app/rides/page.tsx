@@ -103,9 +103,9 @@ export default function RidesPage() {
                 <tr className="text-left text-xs text-zinc-600">
                   <th className="border-b border-zinc-200 px-3 py-2">Terminée</th>
                   <th className="border-b border-zinc-200 px-3 py-2">Chauffeur</th>
-                  <th className="border-b border-zinc-200 px-3 py-2">Tarif (Ar)</th>
+                  <th className="border-b border-zinc-200 px-3 py-2">Brut course (Ar)</th>
                   <th className="border-b border-zinc-200 px-3 py-2">Commission (Ar)</th>
-                  <th className="border-b border-zinc-200 px-3 py-2">Brut chauffeur (Ar)</th>
+                  <th className="border-b border-zinc-200 px-3 py-2">Net chauffeur (Ar)</th>
                   <th className="border-b border-zinc-200 px-3 py-2">Finalisée</th>
                 </tr>
               </thead>

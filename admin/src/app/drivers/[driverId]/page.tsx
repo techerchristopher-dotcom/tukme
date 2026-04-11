@@ -488,7 +488,8 @@ export default function DriverDetailPage() {
                     <thead>
                       <tr className="text-left text-xs text-zinc-600">
                         <th className="border-b border-zinc-200 px-2 py-2">Terminée</th>
-                        <th className="border-b border-zinc-200 px-2 py-2">Brut chauffeur</th>
+                        <th className="border-b border-zinc-200 px-2 py-2">Brut course</th>
+                        <th className="border-b border-zinc-200 px-2 py-2">Net chauffeur</th>
                         <th className="border-b border-zinc-200 px-2 py-2">Commission</th>
                         <th className="border-b border-zinc-200 px-2 py-2">Finalisé</th>
                         <th className="border-b border-zinc-200 px-2 py-2 font-mono">ride_id</th>
@@ -501,6 +502,9 @@ export default function DriverDetailPage() {
                             {r.ride_completed_at
                               ? new Date(r.ride_completed_at).toLocaleString('fr-FR')
                               : '—'}
+                          </td>
+                          <td className="border-b border-zinc-100 px-2 py-2 tabular-nums">
+                            {formatAriary(r.fare_total_ariary)} Ar
                           </td>
                           <td className="border-b border-zinc-100 px-2 py-2 tabular-nums">
                             {formatAriary(r.driver_gross_ariary)} Ar
@@ -518,7 +522,7 @@ export default function DriverDetailPage() {
                       ))}
                       {!data.rides.items.length ? (
                         <tr>
-                          <td className="px-2 py-4 text-zinc-500" colSpan={5}>
+                          <td className="px-2 py-4 text-zinc-500" colSpan={6}>
                             Aucune course.
                           </td>
                         </tr>
