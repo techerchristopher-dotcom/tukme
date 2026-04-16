@@ -4,7 +4,12 @@ import { supabase } from './supabase';
 const FUNCTION_NAME = 'create-payment-intent';
 
 export type CreatePaymentIntentResult =
-  | { ok: true; clientSecret: string }
+  | {
+      ok: true;
+      clientSecret: string;
+      customerId?: string;
+      customerEphemeralKeySecret?: string;
+    }
   | { ok: false; message: string; status?: number };
 
 function normalizeErrorMessage(raw: string): string {
@@ -59,6 +64,8 @@ export async function invokeCreatePaymentIntent(
   const invokeOnce = async (accessToken: string) =>
     supabase.functions.invoke<{
       clientSecret?: string;
+      customerId?: string;
+      customerEphemeralKeySecret?: string;
       error?: string;
     }>(FUNCTION_NAME, {
       body: payload,
@@ -158,7 +165,15 @@ export async function invokeCreatePaymentIntent(
   const body = data as { clientSecret?: string; error?: string } | null;
   const secret = body?.clientSecret?.trim();
   if (secret) {
-    return { ok: true, clientSecret: secret };
+    const customerId = body?.customerId?.trim() || undefined;
+    const customerEphemeralKeySecret =
+      body?.customerEphemeralKeySecret?.trim() || undefined;
+    return {
+      ok: true,
+      clientSecret: secret,
+      ...(customerId ? { customerId } : {}),
+      ...(customerEphemeralKeySecret ? { customerEphemeralKeySecret } : {}),
+    };
   }
 
   const msg = normalizeErrorMessage(body?.error ?? '');

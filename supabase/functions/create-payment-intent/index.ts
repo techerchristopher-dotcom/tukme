@@ -15,6 +15,81 @@ const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY') ?? '', {
   httpClient: Stripe.createFetchHttpClient(),
 });
 
+async function getOrCreateStripeCustomerId(args: {
+  admin: ReturnType<typeof createClient>;
+  stripe: Stripe;
+  userId: string;
+  email?: string | null;
+}): Promise<string> {
+  const { admin, userId, email } = args;
+
+  const { data: profile, error: profErr } = await admin
+    .from('profiles')
+    .select('stripe_customer_id')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (profErr) {
+    throw new Error(`PROFILE_READ_FAILED: ${profErr.message}`);
+  }
+
+  const existing =
+    typeof profile?.stripe_customer_id === 'string'
+      ? profile.stripe_customer_id.trim()
+      : '';
+  if (existing) {
+    return existing;
+  }
+
+  // Idempotent per user: prevents duplicate Stripe Customers if called concurrently.
+  const idempotencyKey = `tukme_customer_${userId}`;
+  const customer = await args.stripe.customers.create(
+    {
+      ...(email?.trim() ? { email: email.trim() } : {}),
+      metadata: { supabase_user_id: userId },
+    },
+    { idempotencyKey }
+  );
+
+  const stripeCustomerId = customer.id?.trim();
+  if (!stripeCustomerId) {
+    throw new Error('STRIPE_CUSTOMER_CREATE_FAILED');
+  }
+
+  // Persist if still null (race-safe).
+  const { error: updErr } = await admin
+    .from('profiles')
+    .update({ stripe_customer_id: stripeCustomerId })
+    .eq('id', userId)
+    .is('stripe_customer_id', null);
+
+  if (updErr) {
+    throw new Error(`PROFILE_UPDATE_FAILED: ${updErr.message}`);
+  }
+
+  // Read back to return the persisted value (handles races where another request wins).
+  const { data: profile2, error: profErr2 } = await admin
+    .from('profiles')
+    .select('stripe_customer_id')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (profErr2) {
+    throw new Error(`PROFILE_READ_FAILED: ${profErr2.message}`);
+  }
+
+  const persisted =
+    typeof profile2?.stripe_customer_id === 'string'
+      ? profile2.stripe_customer_id.trim()
+      : '';
+
+  if (!persisted) {
+    throw new Error('STRIPE_CUSTOMER_NOT_PERSISTED');
+  }
+
+  return persisted;
+}
+
 function mapPiStatus(s: Stripe.PaymentIntent.Status): string {
   switch (s) {
     case 'succeeded':
@@ -233,14 +308,33 @@ Deno.serve(async (req) => {
       });
     }
 
+    // Phase 2: attach the payment to a persistent Stripe Customer so Stripe can save the card.
+    let stripeCustomerId = '';
+    try {
+      stripeCustomerId = await getOrCreateStripeCustomerId({
+        admin,
+        stripe,
+        userId: user.id,
+        email: user.email ?? null,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'customer error';
+      console.error(`${LOG} getOrCreateStripeCustomerId failed`, { rideId, userId: user.id, msg });
+      return new Response(
+        JSON.stringify({ error: 'Impossible de préparer le paiement (client Stripe).' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     const { data: openRow } = await admin
       .from('payments')
-      .select('provider_payment_intent_id')
+      .select('id, status, provider_payment_intent_id')
       .eq('ride_id', rideId)
       .in('status', ['requires_payment_method', 'processing'])
       .maybeSingle();
 
     let clientSecret: string;
+    let piIsAttachedToCustomer = true;
 
     if (openRow?.provider_payment_intent_id) {
       console.log(`${LOG} stripe.retrieve`, { rideId, piId: openRow.provider_payment_intent_id });
@@ -267,7 +361,105 @@ Deno.serve(async (req) => {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
-      clientSecret = existing.client_secret;
+
+      // If the existing PI is not associated to our Customer, Stripe can't reliably save the card for future usage.
+      // Safe fallback: keep the existing PI if it's already processing; otherwise recreate if it's still awaiting a method.
+      const existingCustomer =
+        typeof existing.customer === 'string'
+          ? existing.customer
+          : (existing.customer as { id?: string } | null)?.id ?? null;
+      const canRecreate =
+        openRow.status === 'requires_payment_method' &&
+        existing.status === 'requires_payment_method';
+
+      if (existingCustomer && existingCustomer === stripeCustomerId) {
+        clientSecret = existing.client_secret;
+      } else if (!canRecreate) {
+        // Preserve current behavior for in-flight payments to avoid breaking existing flow.
+        piIsAttachedToCustomer = false;
+        clientSecret = existing.client_secret;
+      } else {
+        console.log(`${LOG} recreate PI to attach customer`, {
+          rideId,
+          piId: existing.id,
+          existingCustomer,
+          stripeCustomerId,
+        });
+
+        // Cancel old PI (best effort) and mark the payment row as canceled so we can create a new active row.
+        await stripe.paymentIntents.cancel(existing.id).catch(() => undefined);
+        if (openRow.id) {
+          await admin
+            .from('payments')
+            .update({ status: 'canceled' })
+            .eq('id', openRow.id)
+            .catch(() => undefined);
+        }
+
+        // Create a fresh PI associated with Customer + setup_future_usage.
+        const eur = Number(ride.estimated_price_eur);
+        const amountCents = Math.max(50, Math.round(eur * 100));
+        const receiptEmail = user.email?.trim() || undefined;
+
+        let pi2: Stripe.PaymentIntent;
+        try {
+          console.log(`${LOG} stripe.paymentIntents.create start`, {
+            rideId,
+            amountCents,
+            currency: 'eur',
+            branch: 'recreate_with_customer',
+          });
+          pi2 = await stripe.paymentIntents.create({
+            amount: amountCents,
+            currency: 'eur',
+            customer: stripeCustomerId,
+            setup_future_usage: 'off_session',
+            automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
+            ...(receiptEmail ? { receipt_email: receiptEmail } : {}),
+            metadata: {
+              ride_id: rideId,
+              client_id: ride.client_id,
+              supabase_user_id: user.id,
+            },
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'Stripe error';
+          console.error(`${LOG} stripe.paymentIntents.create failed`, msg);
+          return new Response(JSON.stringify({ error: msg }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        if (!pi2.client_secret) {
+          console.error(`${LOG} missing client_secret from stripe`, { rideId, piId: pi2.id });
+          return new Response(JSON.stringify({ error: 'Stripe error' }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const { error: insErr2 } = await admin.from('payments').insert({
+          ride_id: rideId,
+          client_id: ride.client_id,
+          provider: 'stripe',
+          provider_payment_intent_id: pi2.id,
+          amount: amountCents,
+          currency: 'eur',
+          status: mapPiStatus(pi2.status),
+        });
+
+        if (insErr2) {
+          console.error(`${LOG} insert payment failed`, insErr2.message);
+          await stripe.paymentIntents.cancel(pi2.id).catch(() => undefined);
+          return new Response(JSON.stringify({ error: insErr2.message }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        clientSecret = pi2.client_secret;
+      }
     } else {
       const eur = Number(ride.estimated_price_eur);
       const amountCents = Math.max(50, Math.round(eur * 100));
@@ -283,12 +475,16 @@ Deno.serve(async (req) => {
         pi = await stripe.paymentIntents.create({
           amount: amountCents,
           currency: 'eur',
+          customer: stripeCustomerId,
+          // Phase 2: let Stripe attach the payment method to the Customer for future use.
+          setup_future_usage: 'off_session',
           // MVP mobile : pas de moyens « redirect » (Bancontact, iDEAL, etc.) → évite Safari/hooks.stripe.com bloqué.
           automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
           ...(receiptEmail ? { receipt_email: receiptEmail } : {}),
           metadata: {
             ride_id: rideId,
             client_id: ride.client_id,
+            supabase_user_id: user.id,
           },
         });
         console.log(`${LOG} stripe.paymentIntents.create ok`, {
@@ -335,15 +531,45 @@ Deno.serve(async (req) => {
       clientSecret = pi.client_secret;
     }
 
+    // PaymentSheet saved cards require customer + ephemeral key, and the PI must be attached to that customer.
+    let customerId: string | undefined;
+    let customerEphemeralKeySecret: string | undefined;
+    if (piIsAttachedToCustomer) {
+      try {
+        const eph = await stripe.ephemeralKeys.create(
+          { customer: stripeCustomerId },
+          { apiVersion: '2023-10-16' }
+        );
+        customerId = stripeCustomerId;
+        customerEphemeralKeySecret = eph.secret ?? undefined;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Stripe error';
+        console.error(`${LOG} stripe.ephemeralKeys.create failed`, msg);
+        return new Response(JSON.stringify({ error: 'Stripe error' }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     console.log(`${LOG} response`, {
       status: 200,
       rideId,
       branch: 'client_secret',
     });
-    return new Response(JSON.stringify({ clientSecret }), {
+    return new Response(
+      JSON.stringify({
+        clientSecret,
+        ...(customerId ? { customerId } : {}),
+        ...(customerEphemeralKeySecret
+          ? { customerEphemeralKeySecret }
+          : {}),
+      }),
+      {
       status: 200,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
+      }
+    );
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'Server error';
     console.error(`${LOG} unhandled`, msg);

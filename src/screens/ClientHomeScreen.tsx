@@ -2345,10 +2345,19 @@ function ClientHomeMiddleContent(props: {
         return;
       }
 
+      const customerArgs =
+        pi.customerId && pi.customerEphemeralKeySecret
+          ? {
+              customerId: pi.customerId,
+              customerEphemeralKeySecret: pi.customerEphemeralKeySecret,
+            }
+          : {};
+
       const { error: initErr } = await initPaymentSheet({
         merchantDisplayName: 'Tukme',
         paymentIntentClientSecret: pi.clientSecret,
         returnURL: STRIPE_RETURN_URL,
+        ...customerArgs,
       });
 
       if (initErr) {
