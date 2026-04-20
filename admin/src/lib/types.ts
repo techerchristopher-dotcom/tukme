@@ -168,3 +168,121 @@ export type CurrentVehicle = {
   active: boolean | null;
 };
 
+// ---------------------------------------------------------------------------
+// Fleet manual module (Suivi du parc)
+// ---------------------------------------------------------------------------
+export type FleetVehicleStatus = 'active' | 'inactive' | 'sold' | 'retired';
+
+export type FleetActiveAssignment = {
+  driver_id: string;
+  driver_full_name: string | null;
+  driver_phone: string | null;
+  starts_at: string;
+  notes?: string | null;
+} | null;
+
+export type FleetVehicleListItem = {
+  id: string;
+  plate_number: string | null;
+  brand: string | null;
+  model: string | null;
+  status: FleetVehicleStatus | string | null;
+  purchase_price_ariary: number | null;
+  purchase_date: string | null;
+  amortization_months: number | null;
+  target_resale_price_ariary: number | null;
+  daily_rent_ariary: number | null;
+  active_assignment: FleetActiveAssignment;
+};
+
+export type FleetVehicleCreateInput = {
+  plate_number: string;
+  brand?: string | null;
+  model?: string | null;
+  status?: FleetVehicleStatus;
+  purchase_price_ariary?: number | null;
+  purchase_date?: string | null; // YYYY-MM-DD
+  amortization_months?: number | null;
+  target_resale_price_ariary?: number | null;
+  daily_rent_ariary?: number | null;
+  notes?: string | null;
+};
+
+export type FleetVehiclePatchInput = Partial<FleetVehicleCreateInput>;
+
+export type FleetAssignmentHistoryRow = {
+  id: string;
+  driver_id: string;
+  driver_full_name: string | null;
+  driver_phone: string | null;
+  starts_at: string;
+  ends_at: string | null;
+  notes: string | null;
+  created_at: string;
+};
+
+export type FleetEntryRow = {
+  id: string;
+  entry_type: 'income' | 'expense';
+  amount_ariary: number;
+  odometer_km?: number | null;
+  entry_date: string; // YYYY-MM-DD
+  category: string;
+  label: string;
+  notes: string | null;
+  created_at: string;
+};
+
+export type FleetFinancialSummary = {
+  vehicle_id: string;
+  purchase_price_ariary: number | null;
+  purchase_date: string | null;
+  amortization_months: number | null;
+  target_resale_price_ariary: number | null;
+  daily_rent_ariary: number | null;
+  total_income_ariary: number;
+  total_expense_ariary: number;
+  net_ariary: number;
+  remaining_to_amortize_ariary: number | null;
+  amortized_percent: number | null;
+  estimated_payoff_date: string | null;
+};
+
+export type FleetVehicleDetailResponse = {
+  vehicle: {
+    id: string;
+    plate_number: string;
+    brand: string | null;
+    model: string | null;
+    status: FleetVehicleStatus | string;
+    purchase_price_ariary: number | null;
+    purchase_date: string | null;
+    amortization_months: number | null;
+    target_resale_price_ariary: number | null;
+    daily_rent_ariary: number | null;
+    notes: string | null;
+    created_at: string;
+    updated_at: string;
+  };
+  active_assignment: FleetActiveAssignment;
+  assignment_history: FleetAssignmentHistoryRow[];
+  recent_entries: FleetEntryRow[];
+  financial_summary: FleetFinancialSummary;
+};
+
+export type FleetEntryCreateInput = {
+  entry_type: 'income' | 'expense';
+  amount_ariary: number;
+  odometer_km?: number | null;
+  entry_date: string; // YYYY-MM-DD
+  category: string;
+  label: string;
+  notes?: string | null;
+};
+
+export type FleetAssignmentCreateInput = {
+  driver_id: string;
+  starts_at?: string | null; // ISO timestamp
+  notes?: string | null;
+};
+

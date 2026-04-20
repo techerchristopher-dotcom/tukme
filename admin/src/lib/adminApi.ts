@@ -13,6 +13,12 @@ import type {
   DriverAccountListFilter,
   DriverDailySummaryRow,
   DriverDetailResponse,
+  FleetAssignmentCreateInput,
+  FleetVehicleCreateInput,
+  FleetVehicleDetailResponse,
+  FleetVehicleListItem,
+  FleetVehiclePatchInput,
+  FleetEntryCreateInput,
   Paginated,
   PayoutRow,
   PlatformDailySummary,
@@ -179,6 +185,72 @@ async function callAdminJson<T>(args: {
   method: 'POST';
   body: Record<string, unknown>;
 }): Promise<ApiResult<T>> {
+  if (!BASE_URL) return { data: null, error: { message: 'Missing NEXT_PUBLIC_SUPABASE_URL' } };
+
+  const supabase = getSupabaseBrowser();
+  if (!supabase) {
+    return {
+      data: null,
+      error: { message: 'Missing NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY' },
+    };
+  }
+
+  const { data, error: sessErr } = await supabase.auth.getSession();
+  if (sessErr) return { data: null, error: { message: 'Session error' } };
+  const token = data.session?.access_token;
+  if (!token) return { data: null, error: { message: 'Not authenticated' } };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${args.path}`, {
+      method: args.method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(API_KEY ? { apikey: API_KEY } : {}),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(args.body),
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      return { data: null, error: { message: 'Request timeout' } };
+    }
+    return { data: null, error: { message: 'Request failed' } };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) {
+    const fallback = `HTTP ${res.status}`;
+    return { data: null, error: parseApiError(payload, fallback) };
+  }
+
+  if (!payload || typeof payload !== 'object') {
+    return { data: null, error: { message: 'Invalid response' } };
+  }
+
+  const env = payload as Record<string, unknown>;
+  if (env.error != null && env.error !== false) {
+    return { data: null, error: parseApiError(env, 'Request failed') };
+  }
+  return { data: (env.data as T) ?? null, error: null } as ApiResult<T>;
+}
+
+async function callAdminJsonWithMethod<T>(args: {
+  path: string;
+  method: 'POST' | 'PATCH';
+  body: Record<string, unknown>;
+}): Promise<ApiResult<T>> {
+  if (args.method === 'POST') {
+    return callAdminJson<T>({ path: args.path, method: 'POST', body: args.body });
+  }
+
   if (!BASE_URL) return { data: null, error: { message: 'Missing NEXT_PUBLIC_SUPABASE_URL' } };
 
   const supabase = getSupabaseBrowser();
@@ -487,6 +559,118 @@ export async function createDriverPayout(
       amount_ariary: amount,
       method: input.method,
       reference: input.reference ?? null,
+      notes: input.notes ?? null,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Fleet manual module (Suivi du parc)
+// ---------------------------------------------------------------------------
+export async function getFleetVehicles(params: {
+  status?: string | null;
+  driver_id?: string | null;
+  q?: string | null;
+  limit?: number;
+  offset?: number;
+}): Promise<ApiResult<Paginated<FleetVehicleListItem>>> {
+  const query = buildQuery({
+    status: params.status ?? undefined,
+    driver_id: params.driver_id ?? undefined,
+    q: params.q ?? undefined,
+    limit: params.limit ?? 50,
+    offset: params.offset ?? 0,
+  });
+  return fetchAdmin(`/fleet/vehicles${query}`);
+}
+
+export async function getFleetVehicle(vehicleId: string): Promise<ApiResult<FleetVehicleDetailResponse>> {
+  const id = vehicleId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  return fetchAdmin(`/fleet/vehicles/${encodeURIComponent(id)}`);
+}
+
+export async function createFleetVehicle(
+  input: FleetVehicleCreateInput
+): Promise<ApiResult<{ vehicle_id: string | null }>> {
+  const plate = input.plate_number.trim();
+  if (!plate) return { data: null, error: { message: 'plate_number obligatoire' } };
+  return callAdminJson<{ vehicle_id: string | null }>({
+    path: '/fleet/vehicles',
+    method: 'POST',
+    body: {
+      plate_number: plate,
+      brand: input.brand ?? null,
+      model: input.model ?? null,
+      status: input.status ?? 'active',
+      purchase_price_ariary: input.purchase_price_ariary ?? null,
+      purchase_date: input.purchase_date ?? null,
+      amortization_months: input.amortization_months ?? null,
+      target_resale_price_ariary: input.target_resale_price_ariary ?? null,
+      daily_rent_ariary: input.daily_rent_ariary ?? null,
+      notes: input.notes ?? null,
+    },
+  });
+}
+
+export async function patchFleetVehicle(
+  vehicleId: string,
+  patch: FleetVehiclePatchInput
+): Promise<ApiResult<{ ok: boolean }>> {
+  const id = vehicleId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  return callAdminJsonWithMethod<{ ok: boolean }>({
+    path: `/fleet/vehicles/${encodeURIComponent(id)}`,
+    method: 'PATCH',
+    body: patch as Record<string, unknown>,
+  });
+}
+
+export async function createFleetVehicleEntry(
+  vehicleId: string,
+  input: FleetEntryCreateInput
+): Promise<ApiResult<{ entry_id: string | null }>> {
+  const id = vehicleId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  return callAdminJson<{ entry_id: string | null }>({
+    path: `/fleet/vehicles/${encodeURIComponent(id)}/entries`,
+    method: 'POST',
+    body: {
+      entry_type: input.entry_type,
+      amount_ariary: input.amount_ariary,
+      odometer_km: input.odometer_km ?? null,
+      entry_date: input.entry_date,
+      category: input.category,
+      label: input.label,
+      notes: input.notes ?? null,
+    },
+  });
+}
+
+export async function setFleetVehicleAssignment(
+  vehicleId: string,
+  input: FleetAssignmentCreateInput
+): Promise<ApiResult<{ assignment_id: string | null }>> {
+  const id = vehicleId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  const driverId = input.driver_id.trim();
+  if (!isUuidString(driverId)) {
+    return { data: null, error: { message: 'driver_id invalide (UUID attendu)' } };
+  }
+  return callAdminJson<{ assignment_id: string | null }>({
+    path: `/fleet/vehicles/${encodeURIComponent(id)}/assignment`,
+    method: 'POST',
+    body: {
+      driver_id: driverId,
+      starts_at: input.starts_at ?? null,
       notes: input.notes ?? null,
     },
   });

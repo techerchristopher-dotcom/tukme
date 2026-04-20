@@ -5,7 +5,7 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [k: string]:
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+  'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
 };
 
 function jsonResponse(
@@ -97,6 +97,30 @@ function requireBodyString(body: Record<string, unknown>, key: string): string {
     throw Object.assign(new Error(`${key} is required`), { status: 400 });
   }
   return t;
+}
+
+function requireBodyDateYmd(body: Record<string, unknown>, key: string): string {
+  const v = body[key];
+  if (typeof v !== 'string') {
+    throw Object.assign(new Error(`${key} must be a string (YYYY-MM-DD)`), { status: 400 });
+  }
+  const t = v.trim();
+  if (!t) {
+    throw Object.assign(new Error(`${key} is required`), { status: 400 });
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) {
+    throw Object.assign(new Error(`${key} must be YYYY-MM-DD`), { status: 400 });
+  }
+  return t;
+}
+
+function asIsoTimestampOrNull(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const t = v.trim();
+  if (!t) return null;
+  const d = new Date(t);
+  if (!Number.isFinite(d.getTime())) return null;
+  return d.toISOString();
 }
 
 async function readJsonBody(req: Request): Promise<Record<string, unknown>> {
@@ -477,6 +501,939 @@ async function handleSetCurrentVehicle(req: Request, driverIdRaw: string): Promi
   return jsonResponse(200, { data: { vehicle_id: vehicleId }, error: null });
 }
 
+type FleetAssignmentRow = {
+  id: string;
+  driver_id: string;
+  vehicle_id: string;
+  starts_at: string;
+  ends_at: string | null;
+  notes: string | null;
+  created_at: string;
+};
+
+type FleetDriverProfile = { id: string; full_name: string | null; phone: string | null };
+
+async function getDriverProfilesById(
+  adminClient: ReturnType<typeof createClient>,
+  ids: string[]
+): Promise<Map<string, FleetDriverProfile>> {
+  const uniq = Array.from(new Set(ids.filter((x) => isUuid(x))));
+  if (!uniq.length) return new Map();
+  const { data, error } = await adminClient
+    .from('profiles')
+    .select('id, full_name, phone')
+    .in('id', uniq);
+  if (error) {
+    console.error('[admin-api] fleet profiles lookup', error.message);
+    throw Object.assign(new Error('Internal error'), { status: 500 });
+  }
+  const m = new Map<string, FleetDriverProfile>();
+  for (const r of data ?? []) {
+    if (r && typeof (r as { id?: unknown }).id === 'string') {
+      const row = r as { id: string; full_name?: unknown; phone?: unknown };
+      m.set(String(row.id), {
+        id: String(row.id),
+        full_name: typeof row.full_name === 'string' ? row.full_name : null,
+        phone: typeof row.phone === 'string' ? row.phone : null,
+      });
+    }
+  }
+  return m;
+}
+
+async function requireFleetVehicleExists(
+  adminClient: ReturnType<typeof createClient>,
+  vehicleId: string
+): Promise<void> {
+  const { data, error } = await adminClient
+    .from('fleet_vehicles')
+    .select('id')
+    .eq('id', vehicleId)
+    .maybeSingle();
+  if (error) {
+    console.error('[admin-api] fleet(manual) vehicle exists check', error.message);
+    throw Object.assign(new Error('Internal error'), { status: 500 });
+  }
+  if (!data?.id) {
+    throw Object.assign(new Error('Vehicle not found'), { status: 404 });
+  }
+}
+
+function parseRpcBigintToSafeNumber(v: unknown): number {
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v)) return 0;
+    if (!Number.isSafeInteger(v)) {
+      throw Object.assign(new Error('Numeric overflow (unsafe integer) from aggregates'), {
+        status: 500,
+      });
+    }
+    return v;
+  }
+  if (typeof v === 'string' && v.trim()) {
+    const n = Number.parseInt(v.trim(), 10);
+    if (!Number.isFinite(n) || !Number.isSafeInteger(n)) {
+      throw Object.assign(new Error('Numeric overflow (unsafe integer) from aggregates'), {
+        status: 500,
+      });
+    }
+    return n;
+  }
+  return 0;
+}
+
+async function computeFleetVehicleEntriesAggregatesFromTable(args: {
+  adminClient: ReturnType<typeof createClient>;
+  vehicleId: string;
+  logPrefix: string;
+}): Promise<{ total_income_ariary: number; total_expense_ariary: number }> {
+  // Minimal + robust (no SQL RPC dependency):
+  // scan all entries for this vehicle and aggregate by entry_type.
+  // We page to avoid the max_rows limit truncating results.
+  const PAGE_SIZE = 1000;
+  let scanOffset = 0;
+  let income = 0;
+  let expense = 0;
+  for (;;) {
+    const { data: rows, error: scanErr } = await args.adminClient
+      .from('fleet_vehicle_entries')
+      .select('entry_type, amount_ariary')
+      .eq('vehicle_id', args.vehicleId)
+      .order('created_at', { ascending: true })
+      .range(scanOffset, scanOffset + PAGE_SIZE - 1);
+    if (scanErr) {
+      console.error(`${args.logPrefix} entries scan error`, {
+        vehicleId: args.vehicleId,
+        message: scanErr.message,
+        offset: scanOffset,
+      });
+      throw Object.assign(new Error('Internal error'), { status: 500 });
+    }
+    const batch = rows ?? [];
+    for (const r of batch as any[]) {
+      const t = String(r?.entry_type ?? '');
+      const a = typeof r?.amount_ariary === 'number' ? r.amount_ariary : Number(r?.amount_ariary ?? 0);
+      if (!Number.isFinite(a)) continue;
+      if (t === 'income') income += a;
+      else if (t === 'expense') expense += a;
+    }
+    if (batch.length < PAGE_SIZE) break;
+    scanOffset += PAGE_SIZE;
+    if (scanOffset > 100_000) {
+      console.error(`${args.logPrefix} entries scan exceeded guardrail`, {
+        vehicleId: args.vehicleId,
+        scanOffset,
+      });
+      throw Object.assign(new Error('Internal error'), { status: 500 });
+    }
+  }
+  return { total_income_ariary: income, total_expense_ariary: expense };
+}
+
+function computeFleetManualFinancialSummary(args: {
+  vehicle_id: string;
+  purchase_price_ariary: number | null;
+  purchase_date: string | null;
+  amortization_months: number | null;
+  target_resale_price_ariary: number | null;
+  daily_rent_ariary: number | null;
+  total_income_ariary: number;
+  total_expense_ariary: number;
+}): Record<string, unknown> {
+  // Enforce the explicit business separation income vs expense (no ambiguous summing).
+  const income = Number.isFinite(args.total_income_ariary) ? args.total_income_ariary : 0;
+  const expense = Number.isFinite(args.total_expense_ariary) ? args.total_expense_ariary : 0;
+  const net = income - expense;
+  const purchase = typeof args.purchase_price_ariary === 'number' ? args.purchase_price_ariary : null;
+
+  const remaining = purchase == null ? null : Math.max(purchase - net, 0);
+
+  const amortizedPercent =
+    purchase && purchase > 0
+      ? Math.min(Math.max(net / purchase, 0), 1) * 100
+      : null;
+
+  return {
+    vehicle_id: args.vehicle_id,
+    purchase_price_ariary: purchase,
+    purchase_date: args.purchase_date,
+    amortization_months: args.amortization_months,
+    target_resale_price_ariary: args.target_resale_price_ariary,
+    daily_rent_ariary: args.daily_rent_ariary,
+    total_income_ariary: income,
+    total_expense_ariary: expense,
+    net_ariary: net,
+    remaining_to_amortize_ariary: remaining,
+    amortized_percent: amortizedPercent,
+    estimated_payoff_date: null,
+  };
+}
+
+async function handleFleetVehiclesList(req: Request, url: URL): Promise<Response> {
+  const { limit, offset } = parseLimitOffset(url);
+  const status = (getStringParam(url, 'status') ?? '').trim().toLowerCase();
+  if (status) {
+    assertOneOf('status', status, ['active', 'inactive', 'sold', 'retired'] as const);
+  }
+  const driverId = (getStringParam(url, 'driver_id') ?? '').trim();
+  if (driverId && !isUuid(driverId)) {
+    throw Object.assign(new Error('driver_id must be a UUID'), { status: 400 });
+  }
+  const q = (getStringParam(url, 'q') ?? '').trim();
+
+  const { adminClient } = await requireAdmin(req);
+  console.log('[admin-api] fleet(manual) list vehicles', {
+    limit,
+    offset,
+    status: status || null,
+    driver_id: driverId || null,
+    q: q || null,
+  });
+
+  let vehicleIdsFilter: string[] | null = null;
+  if (driverId) {
+    const { data: assigns, error: aErr } = await adminClient
+      .from('fleet_vehicle_assignments')
+      .select('vehicle_id')
+      .eq('driver_id', driverId)
+      .is('ends_at', null)
+      .limit(500);
+    if (aErr) {
+      console.error('[admin-api] fleet(manual) list driver assignment filter', aErr.message);
+      return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+    }
+    const ids = (assigns ?? [])
+      .map((r) => String((r as { vehicle_id?: unknown })?.vehicle_id ?? ''))
+      .filter((x) => isUuid(x));
+    vehicleIdsFilter = ids.length ? ids : [];
+  }
+
+  let vQ = adminClient
+    .from('fleet_vehicles')
+    .select(
+      'id, plate_number, brand, model, status, purchase_price_ariary, purchase_date, amortization_months, target_resale_price_ariary, daily_rent_ariary, notes, created_at, updated_at',
+      { count: 'exact' }
+    )
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (status) vQ = vQ.eq('status', status);
+  if (q) vQ = vQ.ilike('plate_number', `%${q}%`);
+  if (vehicleIdsFilter) {
+    if (!vehicleIdsFilter.length) {
+      return jsonResponse(200, { data: { items: [], count: 0, limit, offset }, error: null });
+    }
+    vQ = vQ.in('id', vehicleIdsFilter);
+  }
+
+  const { data: vehicles, count, error: vErr } = await vQ;
+  if (vErr) {
+    console.error('[admin-api] fleet(manual) vehicles list', vErr.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  console.log(
+    '[admin-api] fleet(manual) list vehicles fetched',
+    (vehicles ?? []).slice(0, 5).map((v: any) => String(v?.id ?? ''))
+  );
+
+  const vehicleIds = (vehicles ?? []).map((v: any) => String(v.id)).filter((x) => isUuid(x));
+  const { data: activeAssigns, error: aErr } = await adminClient
+    .from('fleet_vehicle_assignments')
+    .select('id, driver_id, vehicle_id, starts_at, ends_at, notes, created_at')
+    .in('vehicle_id', vehicleIds.length ? vehicleIds : ['00000000-0000-0000-0000-000000000000'])
+    .is('ends_at', null)
+    .order('starts_at', { ascending: false });
+  if (aErr) {
+    console.error('[admin-api] fleet(manual) list active assignments', aErr.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  const byVehicle = new Map<string, FleetAssignmentRow>();
+  const driverIds: string[] = [];
+  for (const r of activeAssigns ?? []) {
+    const vid = String((r as any).vehicle_id ?? '');
+    if (!isUuid(vid)) continue;
+    if (!byVehicle.has(vid)) {
+      byVehicle.set(vid, {
+        id: String((r as any).id),
+        driver_id: String((r as any).driver_id),
+        vehicle_id: vid,
+        starts_at: String((r as any).starts_at),
+        ends_at: (r as any).ends_at == null ? null : String((r as any).ends_at),
+        notes: typeof (r as any).notes === 'string' ? (r as any).notes : null,
+        created_at: String((r as any).created_at),
+      });
+      driverIds.push(String((r as any).driver_id ?? ''));
+    }
+  }
+
+  const profiles = await getDriverProfilesById(adminClient, driverIds);
+
+  const items = (vehicles ?? []).map((v: any) => {
+    const vid = String(v.id ?? '');
+    const a = byVehicle.get(vid) ?? null;
+    const p = a ? profiles.get(a.driver_id) ?? null : null;
+    return {
+      id: String(v.id ?? ''),
+      plate_number: typeof v.plate_number === 'string' ? v.plate_number : null,
+      brand: typeof v.brand === 'string' ? v.brand : null,
+      model: typeof v.model === 'string' ? v.model : null,
+      status: typeof v.status === 'string' ? v.status : null,
+      purchase_price_ariary: typeof v.purchase_price_ariary === 'number' ? v.purchase_price_ariary : null,
+      purchase_date: typeof v.purchase_date === 'string' ? v.purchase_date : null,
+      amortization_months: typeof v.amortization_months === 'number' ? v.amortization_months : null,
+      target_resale_price_ariary:
+        typeof v.target_resale_price_ariary === 'number' ? v.target_resale_price_ariary : null,
+      daily_rent_ariary: typeof v.daily_rent_ariary === 'number' ? v.daily_rent_ariary : null,
+      active_assignment: a
+        ? {
+            driver_id: a.driver_id,
+            driver_full_name: p?.full_name ?? null,
+            driver_phone: p?.phone ?? null,
+            starts_at: a.starts_at,
+          }
+        : null,
+    };
+  });
+
+  return jsonResponse(200, { data: { items, count: count ?? 0, limit, offset }, error: null });
+}
+
+async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: string): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  if (!isUuid(vehicleId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  }
+  let stage = 'init';
+  try {
+    stage = 'requireAdmin';
+    const { adminClient, userEmail } = await requireAdmin(req);
+    console.log('[admin-api] fleet(manual) vehicle detail start', { vehicleId, userEmail });
+
+    stage = 'read fleet_vehicles';
+    const { data: vehicle, error: vErr } = await adminClient
+      .from('fleet_vehicles')
+      .select(
+        'id, plate_number, brand, model, status, purchase_price_ariary, purchase_date, amortization_months, target_resale_price_ariary, daily_rent_ariary, notes, created_at, updated_at'
+      )
+      .eq('id', vehicleId)
+      .maybeSingle();
+    if (vErr) {
+      console.error('[admin-api] fleet(manual) vehicle detail fleet_vehicles error', {
+        vehicleId,
+        message: vErr.message,
+      });
+      return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+    }
+    if (!vehicle?.id) {
+      console.log('[admin-api] fleet(manual) vehicle detail not found', { vehicleId });
+      return jsonResponse(404, { data: null, error: { message: 'Vehicle not found' } });
+    }
+
+    stage = 'read active_assignment';
+    const { data: activeAssign, error: aErr } = await adminClient
+      .from('fleet_vehicle_assignments')
+      .select('id, driver_id, vehicle_id, starts_at, ends_at, notes, created_at')
+      .eq('vehicle_id', vehicleId)
+      .is('ends_at', null)
+      .order('starts_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (aErr) {
+      console.error('[admin-api] fleet(manual) vehicle detail active assignment error', {
+        vehicleId,
+        message: aErr.message,
+      });
+      return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+    }
+    console.log('[admin-api] fleet(manual) vehicle detail active assignment', {
+      vehicleId,
+      has_active: !!activeAssign?.id,
+    });
+
+    stage = 'read assignment_history';
+    const { data: assigns, error: histErr } = await adminClient
+      .from('fleet_vehicle_assignments')
+      .select('id, driver_id, vehicle_id, starts_at, ends_at, notes, created_at')
+      .eq('vehicle_id', vehicleId)
+      .order('starts_at', { ascending: false })
+      .limit(200);
+    if (histErr) {
+      console.error('[admin-api] fleet(manual) vehicle detail assignment history error', {
+        vehicleId,
+        message: histErr.message,
+      });
+      return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+    }
+    console.log('[admin-api] fleet(manual) vehicle detail assignment history', {
+      vehicleId,
+      count: (assigns ?? []).length,
+    });
+
+    stage = 'read driver profiles';
+    const driverIds = (assigns ?? [])
+      .map((r: any) => String(r.driver_id ?? ''))
+      .filter((x) => isUuid(x));
+    let profiles: Map<string, FleetDriverProfile>;
+    try {
+      profiles = await getDriverProfilesById(adminClient, driverIds);
+    } catch (e) {
+      console.error('[admin-api] fleet(manual) vehicle detail driver profiles error', {
+        vehicleId,
+        message: e instanceof Error ? e.message : String(e),
+      });
+      return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+    }
+    console.log('[admin-api] fleet(manual) vehicle detail driver profiles', {
+      vehicleId,
+      requested: driverIds.length,
+      returned: profiles.size,
+    });
+
+    stage = 'read recent_entries';
+    const { data: recentEntries, error: eErr } = await adminClient
+      .from('fleet_vehicle_entries')
+      .select('id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at')
+      .eq('vehicle_id', vehicleId)
+      .order('entry_date', { ascending: false })
+      .order('created_at', { ascending: false })
+      .limit(20);
+    if (eErr) {
+      console.error('[admin-api] fleet(manual) vehicle detail recent entries error', {
+        vehicleId,
+        message: eErr.message,
+      });
+      return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+    }
+    console.log('[admin-api] fleet(manual) vehicle detail recent entries', {
+      vehicleId,
+      count: (recentEntries ?? []).length,
+    });
+
+    stage = 'compute financial_summary (entries scan)';
+    let income = 0;
+    let expense = 0;
+    try {
+      const ag = await computeFleetVehicleEntriesAggregatesFromTable({
+        adminClient,
+        vehicleId,
+        logPrefix: '[admin-api] fleet(manual) vehicle detail',
+      });
+      income = ag.total_income_ariary;
+      expense = ag.total_expense_ariary;
+    } catch (e) {
+      const status =
+        e !== null &&
+        typeof e === 'object' &&
+        'status' in e &&
+        typeof (e as { status: unknown }).status === 'number'
+          ? (e as { status: number }).status
+          : 500;
+      if (status >= 500) return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+      return jsonResponse(status, { data: null, error: { message: 'Internal error' } });
+    }
+    console.log('[admin-api] fleet(manual) vehicle detail aggregates (from entries)', { vehicleId, income, expense });
+
+    stage = 'compute financial_summary (formula)';
+    const summary = computeFleetManualFinancialSummary({
+      vehicle_id: vehicleId,
+      purchase_price_ariary:
+        typeof (vehicle as any).purchase_price_ariary === 'number' ? (vehicle as any).purchase_price_ariary : null,
+      purchase_date: typeof (vehicle as any).purchase_date === 'string' ? (vehicle as any).purchase_date : null,
+      amortization_months:
+        typeof (vehicle as any).amortization_months === 'number' ? (vehicle as any).amortization_months : null,
+      target_resale_price_ariary:
+        typeof (vehicle as any).target_resale_price_ariary === 'number'
+          ? (vehicle as any).target_resale_price_ariary
+          : null,
+      daily_rent_ariary:
+        typeof (vehicle as any).daily_rent_ariary === 'number' ? (vehicle as any).daily_rent_ariary : null,
+      total_income_ariary: income,
+      total_expense_ariary: expense,
+    });
+
+    stage = 'shape response (active_assignment)';
+    const active = activeAssign
+      ? {
+          driver_id: String((activeAssign as any).driver_id ?? ''),
+          driver_full_name:
+            profiles.get(String((activeAssign as any).driver_id ?? ''))?.full_name ?? null,
+          driver_phone: profiles.get(String((activeAssign as any).driver_id ?? ''))?.phone ?? null,
+          starts_at: String((activeAssign as any).starts_at),
+          notes: typeof (activeAssign as any).notes === 'string' ? (activeAssign as any).notes : null,
+        }
+      : null;
+
+    stage = 'shape response (assignment_history)';
+    const assignmentHistory = (assigns ?? []).map((r: any) => {
+      const did = String(r.driver_id ?? '');
+      const p = profiles.get(did) ?? null;
+      return {
+        id: String(r.id ?? ''),
+        driver_id: did,
+        driver_full_name: p?.full_name ?? null,
+        driver_phone: p?.phone ?? null,
+        starts_at: String(r.starts_at),
+        ends_at: r.ends_at == null ? null : String(r.ends_at),
+        notes: typeof r.notes === 'string' ? r.notes : null,
+        created_at: String(r.created_at),
+      };
+    });
+
+    stage = 'response';
+    console.log('[admin-api] fleet(manual) vehicle detail ok', {
+      vehicleId,
+      assignment_history_count: assignmentHistory.length,
+      recent_entries_count: (recentEntries ?? []).length,
+    });
+    return jsonResponse(200, {
+      data: {
+        vehicle,
+        active_assignment: active,
+        assignment_history: assignmentHistory,
+        recent_entries: recentEntries ?? [],
+        financial_summary: summary,
+      },
+      error: null,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[admin-api] fleet(manual) vehicle detail unhandled', {
+      vehicleId,
+      stage,
+      message: msg,
+      stack: e instanceof Error ? e.stack : null,
+    });
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+}
+
+async function handleFleetVehicleCreate(req: Request): Promise<Response> {
+  const { adminClient } = await requireAdmin(req);
+  const body = await readJsonBody(req);
+
+  const plateNumber = requireBodyString(body, 'plate_number');
+  const brand = asNonEmptyString(body.brand);
+  const model = asNonEmptyString(body.model);
+
+  const status = (asNonEmptyString(body.status) ?? 'active').toLowerCase();
+  assertOneOf('status', status, ['active', 'inactive', 'sold', 'retired'] as const);
+
+  const purchasePrice = asInt(body.purchase_price_ariary);
+  if (purchasePrice != null && purchasePrice < 0) {
+    throw Object.assign(new Error('purchase_price_ariary must be >= 0'), { status: 400 });
+  }
+  const amortMonths = asInt(body.amortization_months);
+  if (amortMonths != null && amortMonths <= 0) {
+    throw Object.assign(new Error('amortization_months must be > 0'), { status: 400 });
+  }
+  const purchaseDate =
+    typeof body.purchase_date === 'string' && body.purchase_date.trim()
+      ? requireBodyDateYmd(body, 'purchase_date')
+      : null;
+  const targetResale = asInt(body.target_resale_price_ariary);
+  if (targetResale != null && targetResale < 0) {
+    throw Object.assign(new Error('target_resale_price_ariary must be >= 0'), { status: 400 });
+  }
+  if (purchasePrice != null && targetResale != null && targetResale > purchasePrice) {
+    throw Object.assign(new Error('target_resale_price_ariary must be <= purchase_price_ariary'), {
+      status: 400,
+    });
+  }
+  const dailyRent = asInt(body.daily_rent_ariary);
+  if (dailyRent != null && dailyRent < 0) {
+    throw Object.assign(new Error('daily_rent_ariary must be >= 0'), { status: 400 });
+  }
+  const notes = asNonEmptyString(body.notes);
+
+  const insertRow: Record<string, unknown> = {
+    plate_number: plateNumber,
+    brand: brand ?? null,
+    model: model ?? null,
+    status,
+    purchase_price_ariary: purchasePrice,
+    purchase_date: purchaseDate,
+    amortization_months: amortMonths,
+    target_resale_price_ariary: targetResale,
+    daily_rent_ariary: dailyRent,
+    notes: notes ?? null,
+  };
+
+  const { data, error } = await adminClient
+    .from('fleet_vehicles')
+    .insert(insertRow)
+    .select('id')
+    .maybeSingle();
+  if (error) {
+    console.error('[admin-api] fleet(manual) create vehicle', error.message);
+    return jsonResponse(400, { data: null, error: { message: error.message } });
+  }
+  return jsonResponse(200, { data: { vehicle_id: data?.id ?? null }, error: null });
+}
+
+async function handleFleetVehiclePatch(req: Request, vehicleIdRaw: string): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  if (!isUuid(vehicleId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  }
+
+  const { adminClient } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+
+  const body = await readJsonBody(req);
+
+  const updateRow: Record<string, unknown> = {};
+
+  if ('plate_number' in body) {
+    const pn = asNonEmptyString(body.plate_number);
+    if (!pn) throw Object.assign(new Error('plate_number must be a non-empty string'), { status: 400 });
+    updateRow.plate_number = pn;
+  }
+  if ('brand' in body) updateRow.brand = asNonEmptyString(body.brand);
+  if ('model' in body) updateRow.model = asNonEmptyString(body.model);
+
+  if ('status' in body) {
+    const st = asNonEmptyString(body.status);
+    if (!st) throw Object.assign(new Error('status must be a non-empty string'), { status: 400 });
+    const s = st.toLowerCase();
+    assertOneOf('status', s, ['active', 'inactive', 'sold', 'retired'] as const);
+    updateRow.status = s;
+  }
+
+  if ('purchase_price_ariary' in body) {
+    const v = body.purchase_price_ariary;
+    const n = v == null ? null : asInt(v);
+    if (v != null && n == null) throw Object.assign(new Error('purchase_price_ariary must be an integer'), { status: 400 });
+    if (n != null && n < 0) throw Object.assign(new Error('purchase_price_ariary must be >= 0'), { status: 400 });
+    updateRow.purchase_price_ariary = n;
+  }
+
+  if ('purchase_date' in body) {
+    const v = body.purchase_date;
+    if (v == null || (typeof v === 'string' && !v.trim())) {
+      updateRow.purchase_date = null;
+    } else {
+      updateRow.purchase_date = requireBodyDateYmd(body, 'purchase_date');
+    }
+  }
+
+  if ('amortization_months' in body) {
+    const v = body.amortization_months;
+    const n = v == null ? null : asInt(v);
+    if (v != null && n == null) throw Object.assign(new Error('amortization_months must be an integer'), { status: 400 });
+    if (n != null && n <= 0) throw Object.assign(new Error('amortization_months must be > 0'), { status: 400 });
+    updateRow.amortization_months = n;
+  }
+
+  if ('target_resale_price_ariary' in body) {
+    const v = body.target_resale_price_ariary;
+    const n = v == null ? null : asInt(v);
+    if (v != null && n == null) {
+      throw Object.assign(new Error('target_resale_price_ariary must be an integer'), { status: 400 });
+    }
+    if (n != null && n < 0) throw Object.assign(new Error('target_resale_price_ariary must be >= 0'), { status: 400 });
+    updateRow.target_resale_price_ariary = n;
+  }
+
+  if ('daily_rent_ariary' in body) {
+    const v = body.daily_rent_ariary;
+    const n = v == null ? null : asInt(v);
+    if (v != null && n == null) throw Object.assign(new Error('daily_rent_ariary must be an integer'), { status: 400 });
+    if (n != null && n < 0) throw Object.assign(new Error('daily_rent_ariary must be >= 0'), { status: 400 });
+    updateRow.daily_rent_ariary = n;
+  }
+
+  if ('notes' in body) updateRow.notes = asNonEmptyString(body.notes);
+
+  if (Object.keys(updateRow).length === 0) {
+    throw Object.assign(new Error('No updatable fields provided'), { status: 400 });
+  }
+
+  const { error } = await adminClient.from('fleet_vehicles').update(updateRow).eq('id', vehicleId);
+  if (error) {
+    console.error('[admin-api] fleet(manual) patch vehicle', error.message);
+    return jsonResponse(400, { data: null, error: { message: error.message } });
+  }
+
+  return jsonResponse(200, { data: { ok: true }, error: null });
+}
+
+async function handleFleetVehicleGetAssignment(req: Request, vehicleIdRaw: string): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  if (!isUuid(vehicleId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  }
+  const { adminClient } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+
+  const { data: activeAssign, error } = await adminClient
+    .from('fleet_vehicle_assignments')
+    .select('id, driver_id, vehicle_id, starts_at, ends_at, notes, created_at')
+    .eq('vehicle_id', vehicleId)
+    .is('ends_at', null)
+    .order('starts_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    console.error('[admin-api] fleet(manual) get assignment', error.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  if (!activeAssign) return jsonResponse(200, { data: null, error: null });
+
+  const profiles = await getDriverProfilesById(adminClient, [String((activeAssign as any).driver_id ?? '')]);
+  const p = profiles.get(String((activeAssign as any).driver_id ?? '')) ?? null;
+  return jsonResponse(200, {
+    data: {
+      id: String((activeAssign as any).id),
+      vehicle_id: String((activeAssign as any).vehicle_id),
+      driver_id: String((activeAssign as any).driver_id),
+      driver_full_name: p?.full_name ?? null,
+      driver_phone: p?.phone ?? null,
+      starts_at: String((activeAssign as any).starts_at),
+      notes: typeof (activeAssign as any).notes === 'string' ? (activeAssign as any).notes : null,
+      created_at: String((activeAssign as any).created_at),
+    },
+    error: null,
+  });
+}
+
+async function handleFleetVehicleAssignmentsList(
+  req: Request,
+  url: URL,
+  vehicleIdRaw: string
+): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  if (!isUuid(vehicleId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  }
+  const { limit, offset } = parseLimitOffset(url);
+  const { adminClient } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+
+  const q = adminClient
+    .from('fleet_vehicle_assignments')
+    .select('id, driver_id, vehicle_id, starts_at, ends_at, notes, created_at', { count: 'exact' })
+    .eq('vehicle_id', vehicleId)
+    .order('starts_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  const { data, count, error } = await q;
+  if (error) {
+    console.error('[admin-api] fleet(manual) assignments list', error.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  const driverIds = (data ?? []).map((r: any) => String(r.driver_id ?? '')).filter((x) => isUuid(x));
+  const profiles = await getDriverProfilesById(adminClient, driverIds);
+
+  const items = (data ?? []).map((r: any) => {
+    const did = String(r.driver_id ?? '');
+    const p = profiles.get(did) ?? null;
+    return {
+      id: String(r.id ?? ''),
+      driver_id: did,
+      driver_full_name: p?.full_name ?? null,
+      driver_phone: p?.phone ?? null,
+      starts_at: String(r.starts_at),
+      ends_at: r.ends_at == null ? null : String(r.ends_at),
+      notes: typeof r.notes === 'string' ? r.notes : null,
+      created_at: String(r.created_at),
+    };
+  });
+
+  return jsonResponse(200, { data: { items, count: count ?? 0, limit, offset }, error: null });
+}
+
+async function handleFleetVehicleSetAssignment(req: Request, vehicleIdRaw: string): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  if (!isUuid(vehicleId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  }
+  const { adminClient } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+
+  const body = await readJsonBody(req);
+  const driverId = asNonEmptyString(body.driver_id);
+  if (!driverId || !isUuid(driverId)) {
+    throw Object.assign(new Error('driver_id must be a UUID'), { status: 400 });
+  }
+  const startsAt = asIsoTimestampOrNull(body.starts_at) ?? new Date().toISOString();
+  const notes = asNonEmptyString(body.notes);
+
+  // Prefer the explicit alias RPC, but fall back to the canonical RPC if the alias
+  // migration was not applied yet in the target database (schema cache error).
+  const rpcArgs = {
+    p_vehicle_id: vehicleId,
+    p_driver_id: driverId,
+    p_starts_at: startsAt,
+    p_notes: notes ?? null,
+  };
+
+  let assignmentId: string | null = null;
+  let rpcError: { message?: string } | null = null;
+
+  {
+    const { data, error } = await adminClient.rpc('admin_assign_fleet_vehicle_to_driver', rpcArgs);
+    assignmentId = (data as unknown as string | null) ?? null;
+    rpcError = error as unknown as { message?: string } | null;
+  }
+
+  if (rpcError && String(rpcError.message ?? '').includes('admin_assign_fleet_vehicle_to_driver')) {
+    const { data, error } = await adminClient.rpc('admin_fleet_set_vehicle_assignment', rpcArgs);
+    assignmentId = (data as unknown as string | null) ?? null;
+    rpcError = error as unknown as { message?: string } | null;
+  }
+
+  if (rpcError) {
+    const msg = String(rpcError.message ?? 'RPC error');
+    return jsonResponse(400, { data: null, error: { message: msg } });
+  }
+
+  return jsonResponse(200, { data: { assignment_id: assignmentId }, error: null });
+}
+
+async function handleFleetVehicleEntriesList(req: Request, url: URL, vehicleIdRaw: string): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  if (!isUuid(vehicleId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  }
+  const { limit, offset } = parseLimitOffset(url);
+  const { adminClient } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+
+  const entryType = (getStringParam(url, 'entry_type') ?? '').trim().toLowerCase();
+  if (entryType) assertOneOf('entry_type', entryType, ['income', 'expense'] as const);
+
+  const dateFrom = (getStringParam(url, 'date_from') ?? '').trim();
+  const dateTo = (getStringParam(url, 'date_to') ?? '').trim();
+  if (dateFrom && !/^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) {
+    throw Object.assign(new Error('date_from must be YYYY-MM-DD'), { status: 400 });
+  }
+  if (dateTo && !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+    throw Object.assign(new Error('date_to must be YYYY-MM-DD'), { status: 400 });
+  }
+
+  const q = adminClient
+    .from('fleet_vehicle_entries')
+    .select('id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at', {
+      count: 'exact',
+    })
+    .eq('vehicle_id', vehicleId)
+    .order('entry_date', { ascending: false })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  let q2 = q;
+  if (entryType) q2 = q2.eq('entry_type', entryType);
+  if (dateFrom) q2 = q2.gte('entry_date', dateFrom);
+  if (dateTo) q2 = q2.lte('entry_date', dateTo);
+
+  const { data, count, error } = await q2;
+  if (error) {
+    console.error('[admin-api] fleet(manual) entries list', error.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  return jsonResponse(200, { data: { items: data ?? [], count: count ?? 0, limit, offset }, error: null });
+}
+
+async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: string): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  if (!isUuid(vehicleId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  }
+  const { adminClient } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+  const body = await readJsonBody(req);
+
+  const entryType = asNonEmptyString(body.entry_type)?.toLowerCase() ?? null;
+  if (entryType !== 'income' && entryType !== 'expense') {
+    throw Object.assign(new Error("entry_type must be one of: income, expense"), { status: 400 });
+  }
+  const amount = asInt(body.amount_ariary);
+  if (amount == null || amount <= 0) {
+    throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+  }
+  const odometerKmRaw = (body as Record<string, unknown>).odometer_km;
+  const odometerKm = odometerKmRaw == null ? null : asInt(odometerKmRaw);
+  if (odometerKmRaw != null && odometerKm == null) {
+    throw Object.assign(new Error('odometer_km must be an integer'), { status: 400 });
+  }
+  if (odometerKm != null && odometerKm < 0) {
+    throw Object.assign(new Error('odometer_km must be >= 0'), { status: 400 });
+  }
+  const entryDate = requireBodyDateYmd(body, 'entry_date');
+  const category = requireBodyString(body, 'category');
+  const label = requireBodyString(body, 'label');
+  const notes = asNonEmptyString(body.notes);
+
+  const { data, error } = await adminClient
+    .from('fleet_vehicle_entries')
+    .insert({
+      vehicle_id: vehicleId,
+      entry_type: entryType,
+      amount_ariary: amount,
+      odometer_km: odometerKm,
+      category,
+      label,
+      entry_date: entryDate,
+      notes: notes ?? null,
+    })
+    .select('id')
+    .maybeSingle();
+  if (error) {
+    console.error('[admin-api] fleet(manual) entry create', error.message);
+    return jsonResponse(400, { data: null, error: { message: error.message } });
+  }
+  return jsonResponse(200, { data: { entry_id: data?.id ?? null }, error: null });
+}
+
+async function handleFleetVehicleFinancialSummary(req: Request, _url: URL, vehicleIdRaw: string): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  if (!isUuid(vehicleId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  }
+  const { adminClient } = await requireAdmin(req);
+
+  const { data: vehicle, error: vErr } = await adminClient
+    .from('fleet_vehicles')
+    .select(
+      'id, purchase_price_ariary, purchase_date, amortization_months, target_resale_price_ariary, daily_rent_ariary'
+    )
+    .eq('id', vehicleId)
+    .maybeSingle();
+  if (vErr) {
+    console.error('[admin-api] fleet(manual) summary vehicle', vErr.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  if (!vehicle?.id) return jsonResponse(404, { data: null, error: { message: 'Vehicle not found' } });
+
+  let income = 0;
+  let expense = 0;
+  try {
+    const ag = await computeFleetVehicleEntriesAggregatesFromTable({
+      adminClient,
+      vehicleId,
+      logPrefix: '[admin-api] fleet(manual) financial-summary',
+    });
+    income = ag.total_income_ariary;
+    expense = ag.total_expense_ariary;
+  } catch (e) {
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  const summary = computeFleetManualFinancialSummary({
+    vehicle_id: vehicleId,
+    purchase_price_ariary: typeof (vehicle as any).purchase_price_ariary === 'number' ? (vehicle as any).purchase_price_ariary : null,
+    purchase_date: typeof (vehicle as any).purchase_date === 'string' ? (vehicle as any).purchase_date : null,
+    amortization_months: typeof (vehicle as any).amortization_months === 'number' ? (vehicle as any).amortization_months : null,
+    target_resale_price_ariary: typeof (vehicle as any).target_resale_price_ariary === 'number' ? (vehicle as any).target_resale_price_ariary : null,
+    daily_rent_ariary: typeof (vehicle as any).daily_rent_ariary === 'number' ? (vehicle as any).daily_rent_ariary : null,
+    total_income_ariary: income,
+    total_expense_ariary: expense,
+  });
+
+  return jsonResponse(200, { data: summary, error: null });
+}
+
 type CreatePayoutInput = {
   driver_id: string;
   amount_ariary: number;
@@ -846,7 +1803,7 @@ Deno.serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
-  if (req.method !== 'GET' && req.method !== 'POST' && req.method !== 'DELETE') {
+  if (req.method !== 'GET' && req.method !== 'POST' && req.method !== 'PATCH' && req.method !== 'DELETE') {
     return jsonResponse(405, { data: null, error: { message: 'Method not allowed' } });
   }
 
@@ -916,6 +1873,37 @@ Deno.serve(async (req) => {
 
     if (scope === 'rents') {
       if (rest.length === 0) return await handleRents(req, url);
+      return jsonResponse(404, { data: null, error: { message: 'Not found' } });
+    }
+
+    if (scope === 'fleet') {
+      if (rest.length === 1 && rest[0] === 'vehicles') {
+        if (req.method === 'GET') return await handleFleetVehiclesList(req, url);
+        if (req.method === 'POST') return await handleFleetVehicleCreate(req);
+      }
+      if (rest.length >= 2 && rest[0] === 'vehicles') {
+        const vehicleId = normalizePathId(rest[1] ?? '');
+        if (rest.length === 2 && req.method === 'GET') return await handleFleetVehicleGet(req, url, vehicleId);
+        if (rest.length === 2 && req.method === 'PATCH') return await handleFleetVehiclePatch(req, vehicleId);
+        if (rest.length === 3 && rest[2] === 'assignment' && req.method === 'GET') {
+          return await handleFleetVehicleGetAssignment(req, vehicleId);
+        }
+        if (rest.length === 3 && rest[2] === 'assignment' && req.method === 'POST') {
+          return await handleFleetVehicleSetAssignment(req, vehicleId);
+        }
+        if (rest.length === 3 && rest[2] === 'assignments' && req.method === 'GET') {
+          return await handleFleetVehicleAssignmentsList(req, url, vehicleId);
+        }
+        if (rest.length === 3 && rest[2] === 'entries' && req.method === 'GET') {
+          return await handleFleetVehicleEntriesList(req, url, vehicleId);
+        }
+        if (rest.length === 3 && rest[2] === 'entries' && req.method === 'POST') {
+          return await handleFleetVehicleEntriesCreate(req, vehicleId);
+        }
+        if (rest.length === 3 && rest[2] === 'financial-summary' && req.method === 'GET') {
+          return await handleFleetVehicleFinancialSummary(req, url, vehicleId);
+        }
+      }
       return jsonResponse(404, { data: null, error: { message: 'Not found' } });
     }
 

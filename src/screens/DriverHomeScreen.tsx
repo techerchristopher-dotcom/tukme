@@ -110,10 +110,23 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
   const [otpInput, setOtpInput] = useState('');
   const [otpRideId, setOtpRideId] = useState<string | null>(null);
 
-  const fetchMine = useCallback(async () => {
+  const mineFetchInFlightRef = useRef(false);
+  const mineFetchQueuedRef = useRef(false);
+  const mineFetchDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+  const mineSubscribedRef = useRef(false);
+
+  const runFetchMine = useCallback(async () => {
+    if (mineFetchInFlightRef.current) {
+      mineFetchQueuedRef.current = true;
+      return;
+    }
+    mineFetchInFlightRef.current = true;
     if (!driverId.trim()) {
       setRides([]);
       setLoading(false);
+      mineFetchInFlightRef.current = false;
       return;
     }
     setListError(null);
@@ -138,6 +151,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
       setListError(error.message || 'Impossible de charger vos courses.');
       setRides([]);
       setLoading(false);
+      mineFetchInFlightRef.current = false;
       return;
     }
 
@@ -155,7 +169,22 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
       }
     }
     setLoading(false);
+    mineFetchInFlightRef.current = false;
+    if (mineFetchQueuedRef.current) {
+      mineFetchQueuedRef.current = false;
+      void runFetchMine();
+    }
   }, [driverId]);
+
+  const fetchMine = useCallback(() => {
+    if (mineFetchDebounceTimerRef.current) {
+      return;
+    }
+    mineFetchDebounceTimerRef.current = setTimeout(() => {
+      mineFetchDebounceTimerRef.current = null;
+      void runFetchMine();
+    }, 250);
+  }, [runFetchMine]);
 
   useEffect(() => {
     if (!__DEV__) return;
@@ -169,7 +198,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
   }, [rides]);
 
   useEffect(() => {
-    void fetchMine();
+    fetchMine();
   }, [fetchMine]);
 
   useEffect(() => {
@@ -180,7 +209,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
       if (__DEV__) {
         console.log('[driver-realtime] appstate active -> refetch', 'assigned');
       }
-      void fetchMine();
+      fetchMine();
     });
     return () => {
       sub.remove();
@@ -225,7 +254,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
           'postgres_changes',
           { event: '*', schema: 'public', table: 'rides' },
           () => {
-            void fetchMine();
+            fetchMine();
           }
         )
         .subscribe((status, err) => {
@@ -234,6 +263,7 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
           }
           if (status === 'SUBSCRIBED') {
             setRealtimeError(null);
+            mineSubscribedRef.current = true;
             return;
           }
           if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
@@ -245,13 +275,19 @@ function DriverMyAssignmentsBlock(props: { driverId: string }) {
                   : 'Connexion temps réel indisponible. Vérifiez la publication Realtime et votre session.')
             );
             // Fallback minimal: refetch immédiat pour éviter un écran “mort”.
-            void fetchMine();
+            mineSubscribedRef.current = false;
+            fetchMine();
           }
         });
     })();
 
     return () => {
       cancelled = true;
+      mineSubscribedRef.current = false;
+      if (mineFetchDebounceTimerRef.current) {
+        clearTimeout(mineFetchDebounceTimerRef.current);
+        mineFetchDebounceTimerRef.current = null;
+      }
       if (channel) {
         void supabase.removeChannel(channel);
         channel = null;
@@ -518,12 +554,24 @@ function DriverRequestsBlock() {
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [realtimeError, setRealtimeError] = useState<string | null>(null);
+  const [openSubscribed, setOpenSubscribed] = useState(false);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const openIdsRef = useRef<Set<string>>(new Set());
   const lastRenderedIdsRef = useRef<string>('');
 
-  const fetchOpen = useCallback(async () => {
+  const openFetchInFlightRef = useRef(false);
+  const openFetchQueuedRef = useRef(false);
+  const openFetchDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+
+  const runFetchOpen = useCallback(async () => {
+    if (openFetchInFlightRef.current) {
+      openFetchQueuedRef.current = true;
+      return;
+    }
+    openFetchInFlightRef.current = true;
     setListError(null);
     const before = openIdsRef.current.size;
     if (__DEV__) {
@@ -569,10 +617,25 @@ function DriverRequestsBlock() {
       }
     }
     setLoading(false);
+    openFetchInFlightRef.current = false;
+    if (openFetchQueuedRef.current) {
+      openFetchQueuedRef.current = false;
+      void runFetchOpen();
+    }
   }, [actionError]);
 
+  const fetchOpen = useCallback(() => {
+    if (openFetchDebounceTimerRef.current) {
+      return;
+    }
+    openFetchDebounceTimerRef.current = setTimeout(() => {
+      openFetchDebounceTimerRef.current = null;
+      void runFetchOpen();
+    }, 250);
+  }, [runFetchOpen]);
+
   useEffect(() => {
-    void fetchOpen();
+    fetchOpen();
   }, [fetchOpen]);
 
   useEffect(() => {
@@ -595,23 +658,28 @@ function DriverRequestsBlock() {
    * peut ne pas être livré au client chauffeur. Ce polling léger évite une liste stale.
    */
   useEffect(() => {
+    if (openSubscribed) {
+      if (__DEV__) {
+        console.log('[driver-open] poll disabled (subscribed)');
+      }
+      return;
+    }
     if (__DEV__) {
-      console.log('[driver-open] poll mounted');
+      console.log('[driver-open] poll mounted (fallback)');
     }
     const id = setInterval(() => {
       if (__DEV__) {
-        console.log('[driver-open] poll tick');
+        console.log('[driver-open] poll tick (fallback)');
       }
-      // Ne pas spammer si l’écran est en erreur réseau/rls.
-      void fetchOpen();
-    }, 2500);
+      fetchOpen();
+    }, 4000);
     return () => {
       clearInterval(id);
       if (__DEV__) {
-        console.log('[driver-open] poll cleared');
+        console.log('[driver-open] poll cleared (fallback)');
       }
     };
-  }, [fetchOpen]);
+  }, [fetchOpen, openSubscribed]);
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
@@ -653,7 +721,7 @@ function DriverRequestsBlock() {
           'postgres_changes',
           { event: '*', schema: 'public', table: 'rides' },
           () => {
-            void fetchOpen();
+            fetchOpen();
           }
         )
         .subscribe((status, err) => {
@@ -662,6 +730,7 @@ function DriverRequestsBlock() {
           }
           if (status === 'SUBSCRIBED') {
             setRealtimeError(null);
+            setOpenSubscribed(true);
             return;
           }
           if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
@@ -672,13 +741,19 @@ function DriverRequestsBlock() {
                   ? 'Connexion temps réel indisponible (délai dépassé).'
                   : 'Connexion temps réel indisponible. Vérifiez la publication Realtime et votre session.')
             );
-            void fetchOpen();
+            setOpenSubscribed(false);
+            fetchOpen();
           }
         });
     })();
 
     return () => {
       cancelled = true;
+      setOpenSubscribed(false);
+      if (openFetchDebounceTimerRef.current) {
+        clearTimeout(openFetchDebounceTimerRef.current);
+        openFetchDebounceTimerRef.current = null;
+      }
       if (channel) {
         void supabase.removeChannel(channel);
         channel = null;

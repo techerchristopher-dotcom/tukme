@@ -10,6 +10,7 @@ const nav = [
   { href: '/rides', label: 'Courses' },
   { href: '/payouts', label: 'Payouts' },
   { href: '/rents', label: 'Locations' },
+  { href: '/fleet', label: 'Suivi du parc' },
 ];
 
 export function AdminShell(props: { title: string; children: React.ReactNode }) {
