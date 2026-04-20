@@ -29,6 +29,8 @@ const TERMINAL_STATUSES: ClientRideStatus[] = [
 ];
 
 const TERMINAL_UI_MS = 4500;
+const RT_RETRY_BASE_MS = 800;
+const RT_RETRY_MAX_MS = 12_000;
 
 function isOpenStatus(s: ClientRideStatus): boolean {
   return OPEN_STATUSES.includes(s);
@@ -71,9 +73,7 @@ function buildRideSnapshot(
   const statusRaw = row.status;
   const status =
     typeof statusRaw === 'string'
-      ? statusRaw === 'accepted'
-        ? ('awaiting_payment' as ClientRideStatus)
-        : (statusRaw as ClientRideStatus)
+      ? (statusRaw as ClientRideStatus)
       : prev?.status;
   const updated_at =
     typeof row.updated_at === 'string' ? row.updated_at : prev?.updated_at;
@@ -265,9 +265,14 @@ export function useActiveRide(userId: string) {
   const [fetchLoading, setFetchLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [realtimeError, setRealtimeError] = useState<string | null>(null);
+  const [rtResubscribeKey, setRtResubscribeKey] = useState(0);
 
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const terminalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryAttemptRef = useRef(0);
+  const refetchInFlightRef = useRef(false);
+  const refetchQueuedRef = useRef(false);
 
   const removeChannel = useCallback(() => {
     if (channelRef.current) {
@@ -283,6 +288,13 @@ export function useActiveRide(userId: string) {
     if (terminalTimerRef.current) {
       clearTimeout(terminalTimerRef.current);
       terminalTimerRef.current = null;
+    }
+  }, []);
+
+  const clearRetryTimer = useCallback(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
     }
   }, []);
 
@@ -349,6 +361,23 @@ export function useActiveRide(userId: string) {
     setFetchLoading(false);
   }, [userId]);
 
+  const refetchOpenRideCoalesced = useCallback(async () => {
+    if (refetchInFlightRef.current) {
+      refetchQueuedRef.current = true;
+      return;
+    }
+    refetchInFlightRef.current = true;
+    try {
+      await fetchOpenRide();
+    } finally {
+      refetchInFlightRef.current = false;
+      if (refetchQueuedRef.current) {
+        refetchQueuedRef.current = false;
+        void refetchOpenRideCoalesced();
+      }
+    }
+  }, [fetchOpenRide]);
+
   useEffect(() => {
     void fetchOpenRide();
   }, [fetchOpenRide]);
@@ -400,6 +429,7 @@ export function useActiveRide(userId: string) {
       }
       setRealtimeError(null);
       removeChannel();
+      clearRetryTimer();
       if (cancelled) {
         return;
       }
@@ -430,6 +460,9 @@ export function useActiveRide(userId: string) {
                 }
                 return prev;
               }
+              if (prev && next.updated_at === prev.updated_at) {
+                return prev;
+              }
               if (__DEV__) {
                 console.log(`${LOG} update`, next.status);
               }
@@ -445,6 +478,10 @@ export function useActiveRide(userId: string) {
         )
         .subscribe((status, err) => {
           if (status === 'SUBSCRIBED') {
+            retryAttemptRef.current = 0;
+            clearRetryTimer();
+            // Reconcile possible missed updates after (re)subscribe.
+            void refetchOpenRideCoalesced();
             return;
           }
           if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
@@ -458,6 +495,23 @@ export function useActiveRide(userId: string) {
               console.error(`${LOG} error`, 'subscribe', status, msg);
             }
             setRealtimeError(msg);
+
+            const attempt = retryAttemptRef.current + 1;
+            retryAttemptRef.current = attempt;
+            const delay = Math.min(
+              RT_RETRY_MAX_MS,
+              RT_RETRY_BASE_MS * Math.pow(2, Math.min(6, attempt - 1))
+            );
+            if (__DEV__) {
+              console.log(`${LOG} retry scheduled`, { id, status, attempt, delay });
+            }
+            clearRetryTimer();
+            retryTimerRef.current = setTimeout(() => {
+              if (cancelled) return;
+              void refetchOpenRideCoalesced();
+              removeChannel();
+              setRtResubscribeKey((v) => v + 1);
+            }, delay);
           }
         });
 
@@ -471,10 +525,18 @@ export function useActiveRide(userId: string) {
     return () => {
       cancelled = true;
       removeChannel();
+      clearRetryTimer();
     };
     // Objet `ride` exclu : chaque patch Realtime recrée le snapshot → boucle de resubscribe.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- ride?.id suffit pour cibler la course.
-  }, [ride?.id, removeChannel, scheduleTerminalDismiss]);
+  }, [
+    ride?.id,
+    removeChannel,
+    scheduleTerminalDismiss,
+    clearRetryTimer,
+    refetchOpenRideCoalesced,
+    rtResubscribeKey,
+  ]);
 
   const registerRideAfterCreate = useCallback(
     async (rideId: string) => {
