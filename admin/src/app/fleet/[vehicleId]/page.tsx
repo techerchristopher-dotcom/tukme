@@ -29,6 +29,11 @@ import type {
 } from '@/lib/types';
 import { isUuidString, normalizeUuidParam } from '@/lib/uuid';
 
+function formatNumberFr(n: number, args?: { maxFrac?: number }): string {
+  const maxFrac = args?.maxFrac ?? 0;
+  return new Intl.NumberFormat('fr-FR', { maximumFractionDigits: maxFrac }).format(n);
+}
+
 function asNonEmpty(v: unknown): string | null {
   return typeof v === 'string' && v.trim() ? v.trim() : null;
 }
@@ -52,6 +57,7 @@ function normalizeFleetVehicleDetailResponse(raw: FleetVehicleDetailResponse): F
     (r.active_assignment as FleetVehicleDetailResponse['active_assignment']) ?? null;
   const financial_summary =
     (r.financial_summary as FleetVehicleDetailResponse['financial_summary']) ?? null;
+  const fuel_summary = (r.fuel_summary as FleetVehicleDetailResponse['fuel_summary']) ?? null;
 
   return {
     vehicle,
@@ -59,6 +65,7 @@ function normalizeFleetVehicleDetailResponse(raw: FleetVehicleDetailResponse): F
     assignment_history,
     recent_entries,
     financial_summary,
+    fuel_summary: fuel_summary ?? undefined,
   } as FleetVehicleDetailResponse;
 }
 
@@ -148,6 +155,65 @@ function formatDigitsFr(s: string): string {
   return formatIntFr(n);
 }
 
+function lastKnownKmFromEntries(entries: FleetEntryRow[] | undefined): number | null {
+  if (!entries?.length) return null;
+  const endRow = entries.find((e) => typeof e.fuel_km_end === 'number' && Number.isFinite(e.fuel_km_end));
+  if (typeof endRow?.fuel_km_end === 'number') return endRow.fuel_km_end;
+  const odoRow = entries.find((e) => typeof e.odometer_km === 'number' && Number.isFinite(e.odometer_km));
+  return typeof odoRow?.odometer_km === 'number' ? odoRow.odometer_km : null;
+}
+
+function vehicleFuelRefsUsable(vehicle: FleetVehicleDetailResponse['vehicle'] | undefined | null): boolean {
+  if (!vehicle) return false;
+  const L = vehicle.fuel_ref_litres;
+  const K = vehicle.fuel_ref_km;
+  return typeof L === 'number' && Number.isFinite(L) && L > 0 && typeof K === 'number' && Number.isFinite(K) && K > 0;
+}
+
+/** km crédités = litres × (refKm / refLitres), arrondi entier (Math.round). */
+function kmCreditedFromLitresRounded(litres: number, refLitres: number, refKm: number): number {
+  return Math.round(litres * (refKm / refLitres));
+}
+
+type FleetFuelSummaryRow = NonNullable<FleetVehicleDetailResponse['fuel_summary']>;
+
+function fuelSummaryKmRemainingBase(fs: FleetFuelSummaryRow): number | null {
+  if (typeof fs.km_remaining === 'number' && Number.isFinite(fs.km_remaining)) {
+    return fs.km_remaining;
+  }
+  const tr = fs.total_recharge_km_credited;
+  const tk = fs.total_km_consumed;
+  if (typeof tr === 'number' && Number.isFinite(tr) && typeof tk === 'number' && Number.isFinite(tk)) {
+    return tr - tk;
+  }
+  return null;
+}
+
+function fuelSummaryLitresRemainingBase(fs: FleetFuelSummaryRow): number | null {
+  if (typeof fs.litres_remaining === 'number' && Number.isFinite(fs.litres_remaining)) {
+    return fs.litres_remaining;
+  }
+  if (fs.total_litres_consumed == null) return null;
+  const tr = fs.total_recharge_litres;
+  const tc = fs.total_litres_consumed;
+  if (typeof tr === 'number' && Number.isFinite(tr) && typeof tc === 'number' && Number.isFinite(tc)) {
+    return tr - tc;
+  }
+  return null;
+}
+
+/** Aligné sur la règle serveur `computeFleetFuelSummaryFromEntriesTable` (seuils sur km restants projetés). */
+function fuelAutonomyStatusProjected(
+  kmRemainingProj: number,
+  avgKmPerDay7d: number | null | undefined
+): FleetFuelSummaryRow['autonomy_status'] {
+  const avg = typeof avgKmPerDay7d === 'number' && Number.isFinite(avgKmPerDay7d) ? avgKmPerDay7d : null;
+  if (avg == null || avg <= 0) return 'limite';
+  if (kmRemainingProj > avg * 2) return 'confortable';
+  if (kmRemainingProj >= avg) return 'limite';
+  return 'insuffisante';
+}
+
 function fmtPct(v: number | null | undefined): string {
   if (typeof v !== 'number' || !Number.isFinite(v)) return '—';
   return `${v.toFixed(1)}%`;
@@ -178,6 +244,8 @@ export default function FleetVehicleDetailPage() {
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<FleetVehicleCreateInput | null>(null);
+  const [editFuelRefLitresText, setEditFuelRefLitresText] = useState<string>('');
+  const [editFuelRefKmText, setEditFuelRefKmText] = useState<string>('');
 
   const [entryOpen, setEntryOpen] = useState(false);
   const [entrySubmitting, setEntrySubmitting] = useState(false);
@@ -188,6 +256,9 @@ export default function FleetVehicleDetailPage() {
   const [fuelKmEndText, setFuelKmEndText] = useState<string>('');
   const [fuelPriceText, setFuelPriceText] = useState<string>('');
   const [fuelConsumptionText, setFuelConsumptionText] = useState<string>('');
+  const [fuelRechargeLitresText, setFuelRechargeLitresText] = useState<string>('');
+  const [fuelRechargeKmCreditedText, setFuelRechargeKmCreditedText] = useState<string>('');
+  const [fuelRechargeOdometerText, setFuelRechargeOdometerText] = useState<string>('');
   const [entryForm, setEntryForm] = useState<FleetEntryCreateInput>({
     entry_type: 'expense',
     amount_ariary: 0,
@@ -210,6 +281,8 @@ export default function FleetVehicleDetailPage() {
   const [editFuelKmEndText, setEditFuelKmEndText] = useState<string>('');
   const [editFuelPriceText, setEditFuelPriceText] = useState<string>('');
   const [editFuelConsumptionText, setEditFuelConsumptionText] = useState<string>('');
+  const [editFuelRechargeLitresText, setEditFuelRechargeLitresText] = useState<string>('');
+  const [editFuelRechargeKmCreditedText, setEditFuelRechargeKmCreditedText] = useState<string>('');
   const [entryEditForm, setEntryEditForm] = useState<FleetEntryPatchInput | null>(null);
 
   const [assignOpen, setAssignOpen] = useState(false);
@@ -287,7 +360,19 @@ export default function FleetVehicleDetailPage() {
       target_resale_price_ariary: data.vehicle.target_resale_price_ariary,
       daily_rent_ariary: data.vehicle.daily_rent_ariary,
       notes: data.vehicle.notes ?? '',
+      fuel_ref_litres: data.vehicle.fuel_ref_litres ?? null,
+      fuel_ref_km: data.vehicle.fuel_ref_km ?? null,
     });
+    setEditFuelRefLitresText(
+      typeof data.vehicle.fuel_ref_litres === 'number' && Number.isFinite(data.vehicle.fuel_ref_litres)
+        ? String(data.vehicle.fuel_ref_litres)
+        : ''
+    );
+    setEditFuelRefKmText(
+      typeof data.vehicle.fuel_ref_km === 'number' && Number.isFinite(data.vehicle.fuel_ref_km)
+        ? formatIntFr(data.vehicle.fuel_ref_km)
+        : ''
+    );
     setEditOpen(true);
   }
 
@@ -295,8 +380,55 @@ export default function FleetVehicleDetailPage() {
     e.preventDefault();
     if (!data || !editForm) return;
     setEditError(null);
-    setEditSubmitting(true);
-    const res = await patchFleetVehicle(data.vehicle.id, {
+
+    const litresDigits = editFuelRefLitresText.trim();
+    const kmDigits = digitsOnly(editFuelRefKmText);
+
+    const prevLitres =
+      typeof data.vehicle.fuel_ref_litres === 'number' && Number.isFinite(data.vehicle.fuel_ref_litres)
+        ? data.vehicle.fuel_ref_litres
+        : null;
+    const prevKm =
+      typeof data.vehicle.fuel_ref_km === 'number' && Number.isFinite(data.vehicle.fuel_ref_km)
+        ? data.vehicle.fuel_ref_km
+        : null;
+
+    const hasLitresInput = Boolean(litresDigits);
+    const hasKmInput = Boolean(kmDigits);
+
+    if (hasLitresInput !== hasKmInput) {
+      setEditError('Renseignez les deux références carburant (litres et km), ou laissez les deux vides.');
+      return;
+    }
+
+    let nextFuelRefLitres: number | null = null;
+    let nextFuelRefKm: number | null = null;
+
+    if (hasLitresInput && hasKmInput) {
+      const litres = parseFloatOrNull(litresDigits);
+      if (litres == null || !Number.isFinite(litres) || litres <= 0) {
+        setEditError('Litres de référence invalides (nombre > 0).');
+        return;
+      }
+      const km = Number.parseInt(kmDigits, 10);
+      if (!Number.isInteger(km) || km <= 0) {
+        setEditError('Km de référence invalides (entier > 0).');
+        return;
+      }
+      nextFuelRefLitres = litres;
+      nextFuelRefKm = km;
+    }
+
+    const litresChanged =
+      (prevLitres == null) !== (nextFuelRefLitres == null) ||
+      (prevLitres != null &&
+        nextFuelRefLitres != null &&
+        Math.abs(prevLitres - nextFuelRefLitres) > 1e-6);
+    const kmChanged =
+      (prevKm == null) !== (nextFuelRefKm == null) ||
+      (prevKm != null && nextFuelRefKm != null && prevKm !== nextFuelRefKm);
+
+    const patch: Parameters<typeof patchFleetVehicle>[1] = {
       plate_number: editForm.plate_number,
       brand: asNonEmpty(editForm.brand) ?? null,
       model: asNonEmpty(editForm.model) ?? null,
@@ -307,7 +439,15 @@ export default function FleetVehicleDetailPage() {
       target_resale_price_ariary: editForm.target_resale_price_ariary ?? null,
       daily_rent_ariary: editForm.daily_rent_ariary ?? null,
       notes: asNonEmpty(editForm.notes) ?? null,
-    });
+    };
+
+    if (litresChanged || kmChanged) {
+      patch.fuel_ref_litres = nextFuelRefLitres;
+      patch.fuel_ref_km = nextFuelRefKm;
+    }
+
+    setEditSubmitting(true);
+    const res = await patchFleetVehicle(data.vehicle.id, patch);
     setEditSubmitting(false);
     if (res.error) {
       setEditError(res.error.message);
@@ -325,6 +465,9 @@ export default function FleetVehicleDetailPage() {
     setFuelKmEndText('');
     setFuelPriceText('');
     setFuelConsumptionText('');
+    setFuelRechargeLitresText('');
+    setFuelRechargeKmCreditedText('');
+    setFuelRechargeOdometerText('');
     // Prefill fuel km start from last known (if any).
     const lastKm =
       data?.recent_entries?.find((e) => typeof e.fuel_km_end === 'number' && Number.isFinite(e.fuel_km_end))
@@ -348,45 +491,174 @@ export default function FleetVehicleDetailPage() {
   }
 
   const isFuelEntry = entryForm.category === 'carburant';
+  const isFuelIncome = isFuelEntry && entryForm.entry_type === 'income';
+  const isFuelRecharge = isFuelEntry && entryForm.entry_type === 'expense';
 
   const fuelInlineError = useMemo(() => {
-    if (!isFuelEntry) return null;
+    if (!isFuelIncome) return null;
     return computeFuelDerived({
       kmStartText: fuelKmStartText,
       kmEndText: fuelKmEndText,
       priceText: fuelPriceText,
       consumptionText: fuelConsumptionText,
     }).error;
-  }, [isFuelEntry, fuelKmStartText, fuelKmEndText]);
+  }, [isFuelIncome, fuelKmStartText, fuelKmEndText, fuelPriceText, fuelConsumptionText]);
 
   const fuelKmDay = useMemo(() => {
-    if (!isFuelEntry) return null;
+    if (!isFuelIncome) return null;
     return computeFuelDerived({
       kmStartText: fuelKmStartText,
       kmEndText: fuelKmEndText,
       priceText: fuelPriceText,
       consumptionText: fuelConsumptionText,
     }).kmDay;
-  }, [isFuelEntry, fuelKmStartText, fuelKmEndText]);
+  }, [isFuelIncome, fuelKmStartText, fuelKmEndText, fuelPriceText, fuelConsumptionText]);
 
   const fuelDueAriary = useMemo(() => {
-    if (!isFuelEntry) return null;
+    if (!isFuelIncome) return null;
     return computeFuelDerived({
       kmStartText: fuelKmStartText,
       kmEndText: fuelKmEndText,
       priceText: fuelPriceText,
       consumptionText: fuelConsumptionText,
     }).dueAriary;
-  }, [isFuelEntry, fuelKmStartText, fuelKmEndText, fuelPriceText, fuelConsumptionText]);
+  }, [isFuelIncome, fuelKmStartText, fuelKmEndText, fuelPriceText, fuelConsumptionText]);
 
-  const fuelCanSubmit = isFuelEntry ? fuelDueAriary != null && !fuelInlineError : true;
+  const fuelCanSubmit = useMemo(() => {
+    if (!isFuelEntry) return true;
+    if (isFuelIncome) return fuelDueAriary != null && !fuelInlineError;
+    if (isFuelRecharge) {
+      const litres = parseFloatOrNull(fuelRechargeLitresText);
+      const kmCred = parseFloatOrNull(fuelRechargeKmCreditedText);
+      const amount = Number.parseInt(digitsOnly(entryAmountText), 10) || 0;
+      const priceDigits = digitsOnly(fuelPriceText);
+      const price = priceDigits ? Number.parseInt(priceDigits, 10) : null;
+      const conso = parseFloatOrNull(fuelConsumptionText);
+      const odoDigits = digitsOnly(fuelRechargeOdometerText);
+      const odo = odoDigits ? Number.parseInt(odoDigits, 10) : null;
+      if (litres == null || !Number.isFinite(litres) || litres <= 0) return false;
+      if (kmCred == null || !Number.isFinite(kmCred) || kmCred <= 0) return false;
+      if (!Number.isInteger(amount) || amount <= 0) return false;
+      if (price == null || !Number.isInteger(price) || price <= 0) return false;
+      if (conso == null || !Number.isFinite(conso) || conso <= 0) return false;
+      if (odo == null || !Number.isInteger(odo) || odo < 0) return false;
+      return true;
+    }
+    return true;
+  }, [
+    isFuelEntry,
+    isFuelIncome,
+    isFuelRecharge,
+    fuelDueAriary,
+    fuelInlineError,
+    fuelRechargeLitresText,
+    fuelRechargeKmCreditedText,
+    fuelRechargeOdometerText,
+    entryAmountText,
+    fuelPriceText,
+    fuelConsumptionText,
+  ]);
+
+  /** Projection locale (brouillon) du stock théorique dans la modale carburant + income — sans appel API. */
+  const addEntryIncomeFuelStockPreview = useMemo(() => {
+    if (!entryOpen || !isFuelIncome) return null;
+    const fs = data?.fuel_summary ?? null;
+    if (!fs) {
+      return {
+        hasSummary: false as const,
+        hasRecharge: false,
+        pctGauge: 0,
+        autonomy: null as FleetFuelSummaryRow['autonomy_status'] | null,
+        kmRemaining: null as number | null,
+        litresRemaining: null as number | null,
+        avg: null as number | null,
+        isNegative: false,
+        isProjected: false,
+        litresProjectedActive: false,
+        kmDayDraft: null as number | null,
+        litresConsumedDraft: null as number | null,
+      };
+    }
+    const consumption = parseFloatOrNull(fuelConsumptionText);
+    const kmBase = fuelSummaryKmRemainingBase(fs);
+    const litresBase = fuelSummaryLitresRemainingBase(fs);
+    const totalRechargeKm =
+      typeof fs.total_recharge_km_credited === 'number' && Number.isFinite(fs.total_recharge_km_credited)
+        ? fs.total_recharge_km_credited
+        : 0;
+
+    const draftKmDayOk =
+      fuelInlineError == null &&
+      fuelKmDay != null &&
+      Number.isFinite(fuelKmDay) &&
+      fuelKmDay > 0 &&
+      consumption != null &&
+      Number.isFinite(consumption) &&
+      consumption > 0 &&
+      kmBase != null;
+
+    const kmDayDraft = draftKmDayOk ? fuelKmDay! : null;
+    const litresConsumedDraft =
+      draftKmDayOk && kmDayDraft != null && consumption != null ? kmDayDraft * consumption : null;
+    const kmProj = draftKmDayOk && kmBase != null && kmDayDraft != null ? kmBase - kmDayDraft : null;
+    const litresProj =
+      draftKmDayOk && litresBase != null && litresConsumedDraft != null ? litresBase - litresConsumedDraft : null;
+
+    const useProjection = kmProj != null;
+
+    let pctGauge: number;
+    if (useProjection && totalRechargeKm > 0) {
+      pctGauge = Math.min(100, Math.max(0, (kmProj / totalRechargeKm) * 100));
+    } else {
+      const p0 =
+        typeof fs.percent_remaining === 'number' && Number.isFinite(fs.percent_remaining)
+          ? fs.percent_remaining
+          : 0;
+      pctGauge = Math.min(100, Math.max(0, p0));
+    }
+
+    const kmRemaining = useProjection ? kmProj! : kmBase;
+    const litresRemaining = useProjection && litresProj != null ? litresProj : litresBase;
+
+    const autonomy = useProjection
+      ? fuelAutonomyStatusProjected(kmProj!, fs.avg_km_per_day_7d)
+      : fs.autonomy_status;
+
+    const avg =
+      typeof fs.avg_km_per_day_7d === 'number' && Number.isFinite(fs.avg_km_per_day_7d) ? fs.avg_km_per_day_7d : null;
+    const isNegative =
+      (typeof kmRemaining === 'number' && kmRemaining < 0) ||
+      (typeof litresRemaining === 'number' && litresRemaining < 0);
+
+    return {
+      hasSummary: true as const,
+      hasRecharge: totalRechargeKm > 0,
+      pctGauge,
+      autonomy,
+      kmRemaining,
+      litresRemaining,
+      avg,
+      isNegative,
+      isProjected: useProjection,
+      litresProjectedActive: litresProj != null,
+      kmDayDraft,
+      litresConsumedDraft,
+    };
+  }, [
+    entryOpen,
+    isFuelIncome,
+    data?.fuel_summary,
+    fuelInlineError,
+    fuelKmDay,
+    fuelConsumptionText,
+  ]);
 
   async function submitEntry(e: FormEvent) {
     e.preventDefault();
     if (!data) return;
     setEntryError(null);
 
-    if (isFuelEntry) {
+    if (isFuelIncome) {
       const startDigits = digitsOnly(fuelKmStartText);
       const endDigits = digitsOnly(fuelKmEndText);
       const start = startDigits ? Number.parseInt(startDigits, 10) : null;
@@ -442,6 +714,65 @@ export default function FleetVehicleDetailPage() {
         fuel_price_per_litre_ariary_used: price,
         fuel_consumption_l_per_km_used: conso,
         fuel_due_ariary: due,
+      });
+      setEntrySubmitting(false);
+      if (res.error) {
+        setEntryError(res.error.message);
+        return;
+      }
+      setEntryOpen(false);
+      setRefreshSeq((s) => s + 1);
+      return;
+    }
+
+    if (isFuelRecharge) {
+      const litres = parseFloatOrNull(fuelRechargeLitresText);
+      if (litres == null || !Number.isFinite(litres) || litres <= 0) {
+        setEntryError('Litres ajoutés invalide (nombre > 0).');
+        return;
+      }
+      const kmCredited = parseFloatOrNull(fuelRechargeKmCreditedText);
+      if (kmCredited == null || !Number.isFinite(kmCredited) || kmCredited <= 0) {
+        setEntryError('Km crédités invalide (nombre > 0).');
+        return;
+      }
+      const priceDigits = digitsOnly(fuelPriceText);
+      const price = priceDigits ? Number.parseInt(priceDigits, 10) : null;
+      if (price == null || !Number.isInteger(price) || price <= 0) {
+        setEntryError('Prix litre invalide (entier > 0).');
+        return;
+      }
+      const conso = parseFloatOrNull(fuelConsumptionText);
+      if (conso == null || !Number.isFinite(conso) || conso <= 0) {
+        setEntryError('Consommation invalide (nombre > 0).');
+        return;
+      }
+      const odoDigits = digitsOnly(fuelRechargeOdometerText);
+      const odometerKm = odoDigits ? Number.parseInt(odoDigits, 10) : null;
+      if (odometerKm == null || !Number.isInteger(odometerKm) || odometerKm < 0) {
+        setEntryError('Relevé kilométrique invalide (entier ≥ 0).');
+        return;
+      }
+      const amount = Number.parseInt(digitsOnly(entryAmountText || String(entryForm.amount_ariary || '')), 10) || 0;
+      if (!Number.isInteger(amount) || amount <= 0) {
+        setEntryError('Montant invalide (entier > 0).');
+        return;
+      }
+
+      setEntrySubmitting(true);
+      const res = await createFleetVehicleEntry(data.vehicle.id, {
+        entry_type: 'expense',
+        amount_ariary: amount,
+        odometer_km: odometerKm,
+        entry_date: entryForm.entry_date,
+        category: 'carburant',
+        label: 'Recharge carburant',
+        notes: entryForm.notes?.trim() ? entryForm.notes.trim() : null,
+
+        fuel_recharge_litres_used: litres,
+        fuel_recharge_km_credited_used: kmCredited,
+        fuel_price_per_litre_ariary_used: price,
+        fuel_consumption_l_per_km_used: conso,
       });
       setEntrySubmitting(false);
       if (res.error) {
@@ -550,6 +881,8 @@ export default function FleetVehicleDetailPage() {
     setEditFuelKmEndText('');
     setEditFuelPriceText('');
     setEditFuelConsumptionText('');
+    setEditFuelRechargeLitresText('');
+    setEditFuelRechargeKmCreditedText('');
     setDetailOpen(true);
   }
 
@@ -559,19 +892,26 @@ export default function FleetVehicleDetailPage() {
     setDetailMode('edit');
 
     const isFuel = selectedEntry.category?.trim().toLowerCase() === 'carburant';
+    const isFuelExpense = isFuel && selectedEntry.entry_type === 'expense';
     setEntryEditForm({
       entry_type: selectedEntry.entry_type,
       entry_date: selectedEntry.entry_date,
       category: selectedEntry.category,
       label: selectedEntry.label,
       notes: selectedEntry.notes ?? null,
-      ...(isFuel
+      ...(isFuel && !isFuelExpense
         ? {
             fuel_km_start: selectedEntry.fuel_km_start ?? 0,
             fuel_km_end: selectedEntry.fuel_km_end ?? 0,
             fuel_price_per_litre_ariary_used: selectedEntry.fuel_price_per_litre_ariary_used ?? 0,
             fuel_consumption_l_per_km_used: selectedEntry.fuel_consumption_l_per_km_used ?? 0,
           }
+        : isFuelExpense
+          ? {
+              amount_ariary: selectedEntry.amount_ariary,
+              fuel_recharge_litres_used: selectedEntry.fuel_recharge_litres_used ?? 0,
+              fuel_recharge_km_credited_used: selectedEntry.fuel_recharge_km_credited_used ?? 0,
+            }
         : {
             amount_ariary: selectedEntry.amount_ariary,
             odometer_km: selectedEntry.odometer_km ?? null,
@@ -583,7 +923,7 @@ export default function FleetVehicleDetailPage() {
       setEditOdometerText(
         selectedEntry.odometer_km == null ? '' : formatIntFr(selectedEntry.odometer_km)
       );
-    } else {
+    } else if (!isFuelExpense) {
       setEditFuelKmStartText(
         selectedEntry.fuel_km_start == null ? '' : formatIntFr(selectedEntry.fuel_km_start)
       );
@@ -600,40 +940,65 @@ export default function FleetVehicleDetailPage() {
           ? ''
           : String(selectedEntry.fuel_consumption_l_per_km_used)
       );
+    } else {
+      setEditAmountText(formatIntFr(selectedEntry.amount_ariary));
+      setEditOdometerText(
+        selectedEntry.odometer_km == null ? '' : formatIntFr(selectedEntry.odometer_km)
+      );
+      setEditFuelPriceText(
+        selectedEntry.fuel_price_per_litre_ariary_used == null
+          ? '10 000'
+          : formatIntFr(selectedEntry.fuel_price_per_litre_ariary_used)
+      );
+      setEditFuelConsumptionText(
+        selectedEntry.fuel_consumption_l_per_km_used == null
+          ? '0.05'
+          : String(selectedEntry.fuel_consumption_l_per_km_used)
+      );
+      setEditFuelRechargeLitresText(
+        selectedEntry.fuel_recharge_litres_used == null ? '' : String(selectedEntry.fuel_recharge_litres_used)
+      );
+      setEditFuelRechargeKmCreditedText(
+        selectedEntry.fuel_recharge_km_credited_used == null ? '' : String(selectedEntry.fuel_recharge_km_credited_used)
+      );
     }
   }
 
   const editIsFuel = selectedEntry?.category?.trim().toLowerCase() === 'carburant';
+  const editIsFuelRecharge =
+    editIsFuel && ((entryEditForm?.entry_type ?? selectedEntry?.entry_type) === 'expense');
+  const editIsFuelIncome =
+    editIsFuel && ((entryEditForm?.entry_type ?? selectedEntry?.entry_type) === 'income');
 
   const editFuelKmDay = useMemo(() => {
-    if (!detailOpen || detailMode !== 'edit' || !editIsFuel) return null;
+    if (!detailOpen || detailMode !== 'edit' || !editIsFuelIncome) return null;
     return computeFuelDerived({
       kmStartText: editFuelKmStartText,
       kmEndText: editFuelKmEndText,
       priceText: editFuelPriceText,
       consumptionText: editFuelConsumptionText,
     }).kmDay;
-  }, [detailOpen, detailMode, editIsFuel, editFuelKmStartText, editFuelKmEndText]);
+  }, [detailOpen, detailMode, editIsFuelIncome, editFuelKmStartText, editFuelKmEndText]);
 
   const editFuelDueAriary = useMemo(() => {
-    if (!detailOpen || detailMode !== 'edit' || !editIsFuel) return null;
+    if (!detailOpen || detailMode !== 'edit' || !editIsFuelIncome) return null;
     return computeFuelDerived({
       kmStartText: editFuelKmStartText,
       kmEndText: editFuelKmEndText,
       priceText: editFuelPriceText,
       consumptionText: editFuelConsumptionText,
     }).dueAriary;
-  }, [detailOpen, detailMode, editIsFuel, editFuelKmStartText, editFuelKmEndText, editFuelPriceText, editFuelConsumptionText]);
+  }, [detailOpen, detailMode, editIsFuelIncome, editFuelKmStartText, editFuelKmEndText, editFuelPriceText, editFuelConsumptionText]);
 
   const editFuelInlineError = useMemo(() => {
-    if (!detailOpen || detailMode !== 'edit' || !editIsFuel) return null;
+    if (!detailOpen || detailMode !== 'edit' || !editIsFuelIncome) return null;
     return computeFuelDerived({
       kmStartText: editFuelKmStartText,
       kmEndText: editFuelKmEndText,
       priceText: editFuelPriceText,
       consumptionText: editFuelConsumptionText,
     }).error;
-  }, [detailOpen, detailMode, editIsFuel, editFuelKmStartText, editFuelKmEndText, editFuelPriceText, editFuelConsumptionText]);
+  }, [detailOpen, detailMode, editIsFuelIncome, editFuelKmStartText, editFuelKmEndText, editFuelPriceText, editFuelConsumptionText]);
 
   async function submitEditEntry(e: FormEvent) {
     e.preventDefault();
@@ -648,7 +1013,7 @@ export default function FleetVehicleDetailPage() {
       notes: entryEditForm.notes ?? null,
     };
 
-    if (editIsFuel) {
+    if (editIsFuelIncome) {
       const startDigits = digitsOnly(editFuelKmStartText);
       const endDigits = digitsOnly(editFuelKmEndText);
       const start = startDigits ? Number.parseInt(startDigits, 10) : null;
@@ -666,6 +1031,29 @@ export default function FleetVehicleDetailPage() {
       }
       patch.fuel_km_start = start;
       patch.fuel_km_end = end;
+      patch.fuel_price_per_litre_ariary_used = price;
+      patch.fuel_consumption_l_per_km_used = conso;
+    } else if (editIsFuelRecharge) {
+      const litres = parseFloatOrNull(editFuelRechargeLitresText);
+      if (litres == null || litres <= 0) return setDetailError('Litres ajoutés invalide (nombre > 0).');
+      const kmCredited = parseFloatOrNull(editFuelRechargeKmCreditedText);
+      if (kmCredited == null || kmCredited <= 0) return setDetailError('Km crédités invalide (nombre > 0).');
+      const amount = Number.parseInt(digitsOnly(editAmountText), 10) || 0;
+      if (!Number.isInteger(amount) || amount <= 0) return setDetailError('Montant invalide (entier > 0).');
+      const odoDigits = digitsOnly(editOdometerText);
+      const odo = odoDigits ? Number.parseInt(odoDigits, 10) : null;
+      if (odo == null || !Number.isInteger(odo) || odo < 0) {
+        return setDetailError('Relevé kilométrique invalide (entier ≥ 0).');
+      }
+      const priceDigits = digitsOnly(editFuelPriceText);
+      const price = priceDigits ? Number.parseInt(priceDigits, 10) : null;
+      if (price == null || price <= 0) return setDetailError('Prix litre invalide (entier > 0).');
+      const conso = parseFloatOrNull(editFuelConsumptionText);
+      if (conso == null || conso <= 0) return setDetailError('Consommation invalide (nombre > 0).');
+      patch.amount_ariary = amount;
+      patch.fuel_recharge_litres_used = litres;
+      patch.fuel_recharge_km_credited_used = kmCredited;
+      patch.odometer_km = odo;
       patch.fuel_price_per_litre_ariary_used = price;
       patch.fuel_consumption_l_per_km_used = conso;
     } else {
@@ -799,6 +1187,101 @@ export default function FleetVehicleDetailPage() {
                 <div className="rounded-lg border border-zinc-200 p-3 text-sm sm:col-span-2 lg:col-span-3">
                   <div className="text-xs text-zinc-600">Notes</div>
                   <div className="mt-1 text-zinc-800">{data.vehicle.notes?.trim() ? data.vehicle.notes : '—'}</div>
+                </div>
+              </div>
+            </section>
+
+            {/* Résumé carburant (stock théorique) */}
+            <section className="rounded-xl border border-zinc-200 bg-white p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-zinc-900">Résumé carburant</h2>
+                  <div className="mt-1 text-xs text-zinc-600">
+                    Stock théorique calculé à partir des écritures (recharges et consommations).
+                  </div>
+                </div>
+                {data.fuel_summary?.autonomy_status ? (
+                  <span
+                    className={
+                      'inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ' +
+                      (data.fuel_summary.autonomy_status === 'confortable'
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                        : data.fuel_summary.autonomy_status === 'limite'
+                          ? 'border-amber-200 bg-amber-50 text-amber-900'
+                          : 'border-red-200 bg-red-50 text-red-900')
+                    }
+                  >
+                    {data.fuel_summary.autonomy_status === 'confortable'
+                      ? 'autonomie confortable'
+                      : data.fuel_summary.autonomy_status === 'limite'
+                        ? 'autonomie limite'
+                        : 'autonomie insuffisante'}
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div className="rounded-lg border border-zinc-200 p-3 text-sm">
+                  <div className="text-xs text-zinc-600">Litres restants</div>
+                  <div className="mt-1 font-semibold tabular-nums">
+                    {data.fuel_summary?.litres_remaining == null
+                      ? '—'
+                      : `${formatNumberFr(data.fuel_summary.litres_remaining, { maxFrac: 2 })} L`}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-zinc-200 p-3 text-sm">
+                  <div className="text-xs text-zinc-600">Km restants</div>
+                  <div className="mt-1 font-semibold tabular-nums">
+                    {data.fuel_summary ? `${formatNumberFr(data.fuel_summary.km_remaining)} km` : '—'}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-zinc-200 p-3 text-sm">
+                  <div className="text-xs text-zinc-600">% restant</div>
+                  <div className="mt-1 font-semibold tabular-nums">
+                    {data.fuel_summary?.percent_remaining == null
+                      ? '—'
+                      : `${formatNumberFr(data.fuel_summary.percent_remaining, { maxFrac: 0 })} %`}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-zinc-200 p-3 text-sm">
+                  <div className="text-xs text-zinc-600">Moyenne km/jour (7 jours)</div>
+                  <div className="mt-1 font-medium tabular-nums">
+                    {data.fuel_summary?.avg_km_per_day_7d == null
+                      ? '—'
+                      : `${formatNumberFr(data.fuel_summary.avg_km_per_day_7d, { maxFrac: 1 })} km/j`}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-zinc-200 p-3 text-sm">
+                  <div className="text-xs text-zinc-600">Dernière recharge</div>
+                  <div className="mt-1 font-medium">
+                    {data.fuel_summary?.last_recharge
+                      ? `${data.fuel_summary.last_recharge.entry_date} — ${formatNumberFr(
+                          data.fuel_summary.last_recharge.litres_added,
+                          { maxFrac: 2 }
+                        )} L / ${formatNumberFr(data.fuel_summary.last_recharge.km_credited, { maxFrac: 0 })} km`
+                      : '—'}
+                  </div>
+                  {data.fuel_summary?.last_recharge ? (
+                    <div className="mt-0.5 text-xs text-zinc-600 tabular-nums">
+                      {formatAriary(data.fuel_summary.last_recharge.cost_ariary)} Ar
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="rounded-lg border border-zinc-200 p-3 text-sm">
+                  <div className="text-xs text-zinc-600">Dernier km retour connu</div>
+                  <div className="mt-1 font-medium tabular-nums">
+                    {data.fuel_summary?.last_km_end
+                      ? `${formatNumberFr(data.fuel_summary.last_km_end.km_end)} km`
+                      : '—'}
+                  </div>
+                  {data.fuel_summary?.last_km_end ? (
+                    <div className="mt-0.5 text-xs text-zinc-600">
+                      {data.fuel_summary.last_km_end.entry_date}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </section>
@@ -946,9 +1429,14 @@ export default function FleetVehicleDetailPage() {
                           typeof e.fuel_km_end === 'number' &&
                           Number.isFinite(e.fuel_km_end)
                             ? new Intl.NumberFormat('fr-FR').format(e.fuel_km_end)
-                            : typeof e.odometer_km === 'number' && Number.isFinite(e.odometer_km)
+                            : String(e.category ?? '').trim().toLowerCase() === 'carburant' &&
+                                e.entry_type === 'expense' &&
+                                typeof e.odometer_km === 'number' &&
+                                Number.isFinite(e.odometer_km)
                               ? new Intl.NumberFormat('fr-FR').format(e.odometer_km)
-                              : '—'}
+                              : typeof e.odometer_km === 'number' && Number.isFinite(e.odometer_km)
+                                ? new Intl.NumberFormat('fr-FR').format(e.odometer_km)
+                                : '—'}
                         </td>
                         <td className="border-b border-zinc-100 px-2 py-2">{e.category}</td>
                         <td className="border-b border-zinc-100 px-2 py-2">{e.label}</td>
@@ -1101,6 +1589,37 @@ export default function FleetVehicleDetailPage() {
                         disabled={editSubmitting}
                       />
                     </label>
+                    <div className="sm:col-span-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3">
+                      <div className="text-sm font-medium text-zinc-900">Références carburant par défaut</div>
+                      <p className="mt-1 text-xs text-zinc-600">
+                        Utilisées pour préremplir les recharges <span className="font-mono">carburant + expense</span>.
+                        Laissez vide si vous ne souhaitez pas de valeurs par défaut.
+                      </p>
+                      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <label className="flex flex-col gap-1 text-sm">
+                          <span className="text-zinc-700">Litres de référence (L)</span>
+                          <input
+                            className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                            inputMode="decimal"
+                            placeholder="16"
+                            value={editFuelRefLitresText}
+                            onChange={(e) => setEditFuelRefLitresText(e.target.value)}
+                            disabled={editSubmitting}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1 text-sm">
+                          <span className="text-zinc-700">Km de référence</span>
+                          <input
+                            className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                            inputMode="numeric"
+                            placeholder="285"
+                            value={editFuelRefKmText}
+                            onChange={(e) => setEditFuelRefKmText(e.target.value)}
+                            disabled={editSubmitting}
+                          />
+                        </label>
+                      </div>
+                    </div>
                     <label className="flex flex-col gap-1 text-sm sm:col-span-2">
                       <span className="text-zinc-700">Notes</span>
                       <input
@@ -1160,9 +1679,39 @@ export default function FleetVehicleDetailPage() {
                       <select
                         className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                         value={entryForm.entry_type}
-                        onChange={(e) =>
-                          setEntryForm((p) => ({ ...p, entry_type: e.target.value as 'income' | 'expense' }))
-                        }
+                        onChange={(e) => {
+                          const nextType = e.target.value as 'income' | 'expense';
+                          setEntryForm((p) => ({ ...p, entry_type: nextType }));
+                          if (entryForm.category === 'carburant' && nextType === 'expense') {
+                            const v = data?.vehicle;
+                            const lastKm = lastKnownKmFromEntries(data?.recent_entries);
+                            if (!fuelPriceText.trim()) setFuelPriceText('10 000');
+                            if (!fuelConsumptionText.trim()) setFuelConsumptionText('0.05');
+                            if (!fuelRechargeOdometerText.trim() && lastKm != null) {
+                              setFuelRechargeOdometerText(formatIntFr(lastKm));
+                            }
+                            const refL = v?.fuel_ref_litres;
+                            const refK = v?.fuel_ref_km;
+                            let nextLitresStr = fuelRechargeLitresText.trim();
+                            if (!nextLitresStr && typeof refL === 'number' && Number.isFinite(refL) && refL > 0) {
+                              nextLitresStr = String(refL);
+                              setFuelRechargeLitresText(nextLitresStr);
+                            }
+                            const litresVal = parseFloatOrNull(nextLitresStr);
+                            if (vehicleFuelRefsUsable(v) && litresVal != null && litresVal > 0 && v) {
+                              setFuelRechargeKmCreditedText(
+                                String(kmCreditedFromLitresRounded(litresVal, v.fuel_ref_litres!, v.fuel_ref_km!))
+                              );
+                            } else if (
+                              !fuelRechargeKmCreditedText.trim() &&
+                              typeof refK === 'number' &&
+                              Number.isFinite(refK) &&
+                              refK > 0
+                            ) {
+                              setFuelRechargeKmCreditedText(String(refK));
+                            }
+                          }
+                        }}
                         disabled={entrySubmitting}
                       >
                         <option value="income">Income</option>
@@ -1201,6 +1750,148 @@ export default function FleetVehicleDetailPage() {
                       </div>
                     ) : null}
 
+                    {/* Fuel + income: contextual stock summary (projection locale du brouillon) */}
+                    {isFuelEntry && entryForm.entry_type === 'income' && addEntryIncomeFuelStockPreview ? (
+                      <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-white p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-xs font-medium text-zinc-900">Stock carburant (théorique)</div>
+                            <div className="mt-1 text-xs text-zinc-600">
+                              Indicateur d’aide à la décision (pas d’automatisme).
+                              {addEntryIncomeFuelStockPreview.isProjected ? (
+                                <span className="mt-1 block text-indigo-700">
+                                  Projection locale du brouillon — les valeurs définitives suivent le calcul serveur
+                                  après enregistrement.
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                          {addEntryIncomeFuelStockPreview.autonomy ? (
+                            <span
+                              className={
+                                'inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ' +
+                                (addEntryIncomeFuelStockPreview.autonomy === 'confortable'
+                                  ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                                  : addEntryIncomeFuelStockPreview.autonomy === 'limite'
+                                    ? 'border-amber-200 bg-amber-50 text-amber-900'
+                                    : 'border-red-200 bg-red-50 text-red-900')
+                              }
+                            >
+                              {addEntryIncomeFuelStockPreview.autonomy === 'confortable'
+                                ? 'autonomie confortable'
+                                : addEntryIncomeFuelStockPreview.autonomy === 'limite'
+                                  ? 'autonomie limite'
+                                  : 'autonomie insuffisante'}
+                            </span>
+                          ) : null}
+                        </div>
+
+                        {addEntryIncomeFuelStockPreview.hasSummary ? (
+                          <>
+                            {addEntryIncomeFuelStockPreview.isProjected &&
+                            addEntryIncomeFuelStockPreview.kmDayDraft != null &&
+                            addEntryIncomeFuelStockPreview.litresConsumedDraft != null ? (
+                              <div className="mt-3 grid grid-cols-1 gap-2 rounded-lg border border-indigo-100 bg-indigo-50/60 p-3 text-sm sm:grid-cols-2">
+                                <div>
+                                  <div className="text-xs text-indigo-800">Km du jour (brouillon)</div>
+                                  <div className="mt-0.5 font-semibold tabular-nums text-indigo-950">
+                                    {new Intl.NumberFormat('fr-FR').format(addEntryIncomeFuelStockPreview.kmDayDraft)}
+                                  </div>
+                                </div>
+                                <div>
+                                  <div className="text-xs text-indigo-800">Litres consommés (brouillon)</div>
+                                  <div className="mt-0.5 font-semibold tabular-nums text-indigo-950">
+                                    {formatNumberFr(addEntryIncomeFuelStockPreview.litresConsumedDraft, {
+                                      maxFrac: 2,
+                                    })}{' '}
+                                    L
+                                  </div>
+                                </div>
+                              </div>
+                            ) : null}
+
+                            <div className="mt-4">
+                              <div className="flex items-baseline justify-between gap-3">
+                                <div className="text-sm font-semibold tabular-nums text-zinc-900">
+                                  {formatNumberFr(addEntryIncomeFuelStockPreview.pctGauge, { maxFrac: 0 })}%
+                                </div>
+                                {!addEntryIncomeFuelStockPreview.hasRecharge ? (
+                                  <div className="text-xs text-zinc-600">Aucune recharge enregistrée.</div>
+                                ) : addEntryIncomeFuelStockPreview.isNegative ? (
+                                  <div className="text-xs text-red-700">Stock négatif (théorique).</div>
+                                ) : null}
+                              </div>
+
+                              <div className="mt-2">
+                                <div className="relative h-3 overflow-hidden rounded-full border border-zinc-200">
+                                  <div className="absolute inset-0 flex">
+                                    <div className="w-1/3 bg-red-200" />
+                                    <div className="w-1/3 bg-amber-200" />
+                                    <div className="w-1/3 bg-emerald-200" />
+                                  </div>
+                                  <div
+                                    className="absolute top-0 h-full w-0.5 bg-zinc-900"
+                                    style={{ left: `${addEntryIncomeFuelStockPreview.pctGauge}%` }}
+                                    aria-hidden="true"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                              <div className="rounded-lg border border-zinc-200 p-3 text-sm">
+                                <div className="text-xs text-zinc-600">
+                                  Km restants
+                                  {addEntryIncomeFuelStockPreview.isProjected ? (
+                                    <span className="ml-1 font-normal text-indigo-700">(après brouillon)</span>
+                                  ) : null}
+                                </div>
+                                <div className="mt-1 font-semibold tabular-nums text-zinc-900">
+                                  {addEntryIncomeFuelStockPreview.kmRemaining == null
+                                    ? '—'
+                                    : `${formatNumberFr(addEntryIncomeFuelStockPreview.kmRemaining)} km`}
+                                </div>
+                              </div>
+                              <div className="rounded-lg border border-zinc-200 p-3 text-sm">
+                                <div className="text-xs text-zinc-600">
+                                  Litres restants
+                                  {addEntryIncomeFuelStockPreview.litresProjectedActive ? (
+                                    <span className="ml-1 font-normal text-indigo-700">(après brouillon)</span>
+                                  ) : null}
+                                </div>
+                                <div className="mt-1 font-semibold tabular-nums text-zinc-900">
+                                  {addEntryIncomeFuelStockPreview.litresRemaining == null
+                                    ? '—'
+                                    : `${formatNumberFr(addEntryIncomeFuelStockPreview.litresRemaining, {
+                                        maxFrac: 2,
+                                      })} L`}
+                                </div>
+                              </div>
+                              <div className="rounded-lg border border-zinc-200 p-3 text-sm sm:col-span-2">
+                                <div className="flex items-baseline justify-between gap-3">
+                                  <div className="text-xs text-zinc-600">Moyenne km/jour (7 jours)</div>
+                                  <div className="text-xs text-zinc-500">
+                                    {addEntryIncomeFuelStockPreview.avg == null
+                                      ? 'non fiable (< 2 jours actifs)'
+                                      : null}
+                                  </div>
+                                </div>
+                                <div className="mt-1 font-medium tabular-nums text-zinc-900">
+                                  {addEntryIncomeFuelStockPreview.avg == null
+                                    ? '—'
+                                    : `${formatNumberFr(addEntryIncomeFuelStockPreview.avg, { maxFrac: 1 })} km/j`}
+                                </div>
+                              </div>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="mt-4 text-sm text-zinc-600">
+                            Résumé carburant indisponible (rafraîchir la fiche ou vérifier les données).
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+
                     {/* Standard (non-fuel): keep legacy fields */}
                     {!isFuelEntry ? (
                       <>
@@ -1230,22 +1921,109 @@ export default function FleetVehicleDetailPage() {
                       </>
                     ) : null}
 
-                    {/* Fuel but not income: keep a minimal, non-ambiguous summary (no manual amount). */}
-                    {isFuelEntry && entryForm.entry_type !== 'income' ? (
-                      <>
-                        <div className="rounded-lg border border-zinc-200 px-3 py-2 text-sm">
-                          <div className="text-xs text-zinc-600">Carburant dû (Ar)</div>
-                          <div className="mt-1 font-semibold tabular-nums">
-                            {fuelDueAriary == null ? '—' : `${formatAriary(fuelDueAriary)} Ar`}
-                          </div>
+                    {isFuelRecharge ? (
+                      <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+                        <div className="text-xs font-medium text-zinc-900">Recharge carburant</div>
+                        <p className="mt-1 text-xs text-zinc-600">
+                          Km crédités se recalculent depuis les litres si les références véhicule sont renseignées ; vous
+                          pouvez les ajuster manuellement si besoin.
+                        </p>
+                        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                            <span className="text-zinc-700">Relevé kilométrique (compteur)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="numeric"
+                              placeholder="ex: 45 280"
+                              value={fuelRechargeOdometerText}
+                              onChange={(e) => setFuelRechargeOdometerText(e.target.value)}
+                              onBlur={() => setFuelRechargeOdometerText((v) => formatDigitsFr(v))}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Litres ajoutés</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="decimal"
+                              placeholder={
+                                data?.vehicle?.fuel_ref_litres != null ? String(data.vehicle.fuel_ref_litres) : 'ex: 16'
+                              }
+                              value={fuelRechargeLitresText}
+                              onChange={(e) => {
+                                const next = e.target.value;
+                                setFuelRechargeLitresText(next);
+                                const v = data?.vehicle;
+                                if (vehicleFuelRefsUsable(v) && v) {
+                                  const parsed = parseFloatOrNull(next);
+                                  if (parsed != null && Number.isFinite(parsed) && parsed > 0) {
+                                    setFuelRechargeKmCreditedText(
+                                      String(
+                                        kmCreditedFromLitresRounded(parsed, v.fuel_ref_litres!, v.fuel_ref_km!)
+                                      )
+                                    );
+                                  }
+                                }
+                              }}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Km crédités</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="decimal"
+                              placeholder={
+                                data?.vehicle?.fuel_ref_litres != null && data?.vehicle?.fuel_ref_km != null
+                                  ? String(
+                                      kmCreditedFromLitresRounded(
+                                        Number(data.vehicle.fuel_ref_litres),
+                                        data.vehicle.fuel_ref_litres,
+                                        data.vehicle.fuel_ref_km
+                                      )
+                                    )
+                                  : 'ex: 285'
+                              }
+                              value={fuelRechargeKmCreditedText}
+                              onChange={(e) => setFuelRechargeKmCreditedText(e.target.value)}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Prix litre (Ar)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="numeric"
+                              value={fuelPriceText}
+                              onChange={(e) => setFuelPriceText(e.target.value)}
+                              onBlur={() => setFuelPriceText((v) => formatDigitsFr(v))}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Consommation (L/km)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="decimal"
+                              placeholder="ex: 0.05"
+                              value={fuelConsumptionText}
+                              onChange={(e) => setFuelConsumptionText(e.target.value)}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                            <span className="text-zinc-700">Coût (Ar)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="numeric"
+                              value={entryAmountText}
+                              onChange={(e) => setEntryAmountText(e.target.value)}
+                              onBlur={() => setEntryAmountText((v) => formatDigitsFr(v))}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
                         </div>
-                        <div className="rounded-lg border border-zinc-200 px-3 py-2 text-sm">
-                          <div className="text-xs text-zinc-600">Km du jour</div>
-                          <div className="mt-1 font-semibold tabular-nums">
-                            {fuelKmDay == null ? '—' : new Intl.NumberFormat('fr-FR').format(fuelKmDay)}
-                          </div>
-                        </div>
-                      </>
+                      </div>
                     ) : null}
 
                     <label className="flex flex-col gap-1 text-sm">
@@ -1274,6 +2052,7 @@ export default function FleetVehicleDetailPage() {
                             odometer_km: next === 'carburant' ? null : p.odometer_km,
                           }));
                           if (next === 'carburant') {
+                            // Defaults for the "income" fuel form (driver payment flow).
                             if (!fuelPriceText.trim()) setFuelPriceText('10 000');
                             if (!fuelConsumptionText.trim()) setFuelConsumptionText('0.05');
                             // Prefill km départ from last known km retour (fuel) if empty.
@@ -1287,6 +2066,29 @@ export default function FleetVehicleDetailPage() {
                                 )?.odometer_km ??
                                 null;
                               if (lastKm != null) setFuelKmStartText(formatIntFr(lastKm));
+                            }
+
+                            // Prefill recharge defaults (used if user switches to expense).
+                            const v = data?.vehicle;
+                            const refLitres = v?.fuel_ref_litres ?? null;
+                            const refKm = v?.fuel_ref_km ?? null;
+                            let nextLitresStr = fuelRechargeLitresText.trim();
+                            if (!nextLitresStr && typeof refLitres === 'number' && Number.isFinite(refLitres) && refLitres > 0) {
+                              nextLitresStr = String(refLitres);
+                              setFuelRechargeLitresText(nextLitresStr);
+                            }
+                            const litresVal = parseFloatOrNull(nextLitresStr);
+                            if (vehicleFuelRefsUsable(v) && litresVal != null && litresVal > 0 && v) {
+                              setFuelRechargeKmCreditedText(
+                                String(kmCreditedFromLitresRounded(litresVal, v.fuel_ref_litres!, v.fuel_ref_km!))
+                              );
+                            } else if (
+                              !fuelRechargeKmCreditedText.trim() &&
+                              typeof refKm === 'number' &&
+                              Number.isFinite(refKm) &&
+                              refKm > 0
+                            ) {
+                              setFuelRechargeKmCreditedText(String(refKm));
                             }
                           }
                         }}
@@ -1313,7 +2115,7 @@ export default function FleetVehicleDetailPage() {
                       </label>
                     ) : null}
 
-                    {isFuelEntry ? (
+                    {isFuelIncome ? (
                       <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-white p-4">
                         <div className="text-xs font-medium text-zinc-900">Saisie métier</div>
                         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1378,7 +2180,7 @@ export default function FleetVehicleDetailPage() {
                         {entryError}
                       </div>
                     ) : null}
-                    {isFuelEntry && fuelInlineError ? (
+                    {isFuelIncome && fuelInlineError ? (
                       <div className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                         {fuelInlineError}
                       </div>
@@ -1470,7 +2272,8 @@ export default function FleetVehicleDetailPage() {
                         <div className="text-xs text-zinc-600">Montant (Ar)</div>
                         <div className="mt-1 font-semibold tabular-nums">{formatAriary(selectedEntry.amount_ariary)} Ar</div>
                       </div>
-                      {selectedEntry.category?.trim().toLowerCase() === 'carburant' ? (
+                      {selectedEntry.category?.trim().toLowerCase() === 'carburant' &&
+                      selectedEntry.entry_type === 'income' ? (
                         <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
                           <div className="text-xs font-medium text-emerald-900">Carburant (snapshot)</div>
                           <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
@@ -1494,6 +2297,39 @@ export default function FleetVehicleDetailPage() {
                             </div>
                           </div>
                           <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-emerald-800">
+                            <div>Prix litre: {selectedEntry.fuel_price_per_litre_ariary_used ?? '—'} Ar</div>
+                            <div>Conso: {selectedEntry.fuel_consumption_l_per_km_used ?? '—'} L/km</div>
+                          </div>
+                        </div>
+                      ) : selectedEntry.category?.trim().toLowerCase() === 'carburant' &&
+                        selectedEntry.entry_type === 'expense' ? (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                          <div className="text-xs font-medium text-amber-900">Recharge carburant</div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+                            <div>
+                              <div className="text-xs text-amber-800">Relevé kilométrique</div>
+                              <div className="font-medium tabular-nums">
+                                {selectedEntry.odometer_km == null
+                                  ? '—'
+                                  : new Intl.NumberFormat('fr-FR').format(selectedEntry.odometer_km)}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-amber-800">Litres ajoutés</div>
+                              <div className="font-medium tabular-nums">{selectedEntry.fuel_recharge_litres_used ?? '—'}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-amber-800">Km crédités</div>
+                              <div className="font-medium tabular-nums">
+                                {selectedEntry.fuel_recharge_km_credited_used ?? '—'}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-amber-800">Coût</div>
+                              <div className="font-semibold tabular-nums">{formatAriary(selectedEntry.amount_ariary)} Ar</div>
+                            </div>
+                          </div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-amber-800">
                             <div>Prix litre: {selectedEntry.fuel_price_per_litre_ariary_used ?? '—'} Ar</div>
                             <div>Conso: {selectedEntry.fuel_consumption_l_per_km_used ?? '—'} L/km</div>
                           </div>
@@ -1550,7 +2386,7 @@ export default function FleetVehicleDetailPage() {
                         />
                       </label>
 
-                      {editIsFuel ? (
+                      {editIsFuelIncome ? (
                         <div className="sm:col-span-2 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
                           <div className="text-xs font-medium text-emerald-900">Résultat (carburant)</div>
                           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1570,7 +2406,7 @@ export default function FleetVehicleDetailPage() {
                         </div>
                       ) : null}
 
-                      {editIsFuel ? (
+                      {editIsFuelIncome ? (
                         <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-white p-4">
                           <div className="text-xs font-medium text-zinc-900">Saisie métier</div>
                           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1614,6 +2450,89 @@ export default function FleetVehicleDetailPage() {
                                 inputMode="decimal"
                                 value={editFuelConsumptionText}
                                 onChange={(e) => setEditFuelConsumptionText(e.target.value)}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                          </div>
+                        </div>
+                      ) : editIsFuelRecharge ? (
+                        <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-zinc-50 p-4">
+                          <div className="text-xs font-medium text-zinc-900">Recharge carburant</div>
+                          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                              <span className="text-zinc-700">Relevé kilométrique (compteur)</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="numeric"
+                                value={editOdometerText}
+                                onChange={(e) => setEditOdometerText(e.target.value)}
+                                onBlur={() => setEditOdometerText((v) => formatDigitsFr(v))}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-sm">
+                              <span className="text-zinc-700">Litres ajoutés</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="decimal"
+                                value={editFuelRechargeLitresText}
+                                onChange={(e) => {
+                                  const next = e.target.value;
+                                  setEditFuelRechargeLitresText(next);
+                                  const v = data?.vehicle;
+                                  if (vehicleFuelRefsUsable(v) && v) {
+                                    const parsed = parseFloatOrNull(next);
+                                    if (parsed != null && Number.isFinite(parsed) && parsed > 0) {
+                                      setEditFuelRechargeKmCreditedText(
+                                        String(
+                                          kmCreditedFromLitresRounded(parsed, v.fuel_ref_litres!, v.fuel_ref_km!)
+                                        )
+                                      );
+                                    }
+                                  }
+                                }}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-sm">
+                              <span className="text-zinc-700">Km crédités</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="decimal"
+                                value={editFuelRechargeKmCreditedText}
+                                onChange={(e) => setEditFuelRechargeKmCreditedText(e.target.value)}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-sm">
+                              <span className="text-zinc-700">Prix litre (Ar)</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="numeric"
+                                value={editFuelPriceText}
+                                onChange={(e) => setEditFuelPriceText(e.target.value)}
+                                onBlur={() => setEditFuelPriceText((v) => formatDigitsFr(v))}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-sm">
+                              <span className="text-zinc-700">Consommation (L/km)</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="decimal"
+                                value={editFuelConsumptionText}
+                                onChange={(e) => setEditFuelConsumptionText(e.target.value)}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                              <span className="text-zinc-700">Coût (Ar)</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="numeric"
+                                value={editAmountText}
+                                onChange={(e) => setEditAmountText(e.target.value)}
+                                onBlur={() => setEditAmountText((v) => formatDigitsFr(v))}
                                 disabled={detailSubmitting}
                               />
                             </label>
@@ -1686,7 +2605,7 @@ export default function FleetVehicleDetailPage() {
                           {detailError}
                         </div>
                       ) : null}
-                      {editIsFuel && editFuelInlineError ? (
+                      {editIsFuelIncome && editFuelInlineError ? (
                         <div className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                           {editFuelInlineError}
                         </div>
@@ -1703,7 +2622,10 @@ export default function FleetVehicleDetailPage() {
                         <button
                           type="submit"
                           className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
-                          disabled={detailSubmitting || (editIsFuel && (editFuelDueAriary == null || editFuelInlineError != null))}
+                          disabled={
+                            detailSubmitting ||
+                            (editIsFuelIncome && (editFuelDueAriary == null || editFuelInlineError != null))
+                          }
                         >
                           {detailSubmitting ? 'Enregistrement…' : 'Enregistrer'}
                         </button>

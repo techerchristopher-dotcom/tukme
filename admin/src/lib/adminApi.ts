@@ -717,6 +717,9 @@ export async function createFleetVehicleEntry(
       fuel_price_per_litre_ariary_used: input.fuel_price_per_litre_ariary_used ?? null,
       fuel_consumption_l_per_km_used: input.fuel_consumption_l_per_km_used ?? null,
       fuel_due_ariary: input.fuel_due_ariary ?? null,
+
+      fuel_recharge_litres_used: input.fuel_recharge_litres_used ?? null,
+      fuel_recharge_km_credited_used: input.fuel_recharge_km_credited_used ?? null,
     },
   });
 }

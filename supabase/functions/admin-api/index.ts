@@ -87,6 +87,17 @@ function asInt(v: unknown): number | null {
   return null;
 }
 
+function asNumber(v: unknown): number | null {
+  if (typeof v === 'number') {
+    return Number.isFinite(v) ? v : null;
+  }
+  if (typeof v === 'string' && v.trim()) {
+    const n = Number.parseFloat(v.trim());
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 function requireBodyString(body: Record<string, unknown>, key: string): string {
   const v = body[key];
   if (typeof v !== 'string') {
@@ -170,6 +181,203 @@ function buildUtcDayRangeForMadagascar(businessDate: string): { startIso: string
   const startUtcMs = Date.UTC(y, m - 1, d, 0, 0, 0) - 3 * 60 * 60 * 1000;
   const endUtcMs = startUtcMs + 24 * 60 * 60 * 1000;
   return { startIso: new Date(startUtcMs).toISOString(), endIso: new Date(endUtcMs).toISOString() };
+}
+
+function madagascarTodayYmd(): string {
+  // Madagascar is UTC+3 (no DST). Convert "now" into local YYYY-MM-DD.
+  const ms = Date.now() + 3 * 60 * 60 * 1000;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function addDaysYmd(ymd: string, deltaDays: number): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
+  const [y, m, d] = ymd.split('-').map((x) => Number.parseInt(x, 10));
+  const baseMs = Date.UTC(y, m - 1, d, 0, 0, 0);
+  const nextMs = baseMs + deltaDays * 24 * 60 * 60 * 1000;
+  return new Date(nextMs).toISOString().slice(0, 10);
+}
+
+function isAfterEntry(
+  a: { entry_date?: unknown; created_at?: unknown },
+  b: { entry_date?: unknown; created_at?: unknown }
+): boolean {
+  const ad = typeof a.entry_date === 'string' ? a.entry_date : '';
+  const bd = typeof b.entry_date === 'string' ? b.entry_date : '';
+  if (ad !== bd) return ad > bd;
+  const ac = typeof a.created_at === 'string' ? a.created_at : '';
+  const bc = typeof b.created_at === 'string' ? b.created_at : '';
+  return ac > bc;
+}
+
+type FleetFuelSummary = {
+  total_recharge_litres: number;
+  total_recharge_km_credited: number;
+  total_km_consumed: number;
+  total_litres_consumed: number | null;
+  litres_remaining: number | null;
+  km_remaining: number;
+  percent_remaining: number | null;
+  avg_km_per_day_7d: number | null;
+  last_recharge: {
+    entry_id: string;
+    entry_date: string;
+    litres_added: number;
+    km_credited: number;
+    cost_ariary: number;
+  } | null;
+  last_km_end: {
+    entry_id: string;
+    entry_date: string;
+    km_end: number;
+  } | null;
+  autonomy_status: 'confortable' | 'limite' | 'insuffisante';
+};
+
+async function computeFleetFuelSummaryFromEntriesTable(args: {
+  adminClient: ReturnType<typeof createClient>;
+  vehicleId: string;
+  fuelRefLitres: number | null;
+  fuelRefKm: number | null;
+}): Promise<FleetFuelSummary> {
+  const PAGE_SIZE = 1000;
+  let scanOffset = 0;
+
+  let totalRechargeLitres = 0;
+  let totalRechargeKmCredited = 0;
+  let totalKmConsumed = 0;
+
+  const todayYmd = madagascarTodayYmd();
+  const from7d = addDaysYmd(todayYmd, -6);
+  let sumKmLast7 = 0;
+  const kmByDayLast7 = new Map<string, number>();
+
+  let lastRechargeRow: any | null = null;
+  let lastKmEndRow: any | null = null;
+
+  for (;;) {
+    const { data: rows, error } = await args.adminClient
+      .from('fleet_vehicle_entries')
+      .select(
+        'id, entry_type, entry_date, created_at, amount_ariary, category, fuel_km_travelled, fuel_km_end, fuel_recharge_litres_used, fuel_recharge_km_credited_used'
+      )
+      .eq('vehicle_id', args.vehicleId)
+      .is('deleted_at', null)
+      .eq('category', 'carburant')
+      .order('created_at', { ascending: true })
+      .range(scanOffset, scanOffset + PAGE_SIZE - 1);
+    if (error) {
+      console.error('[admin-api] fleet(manual) fuel summary scan', error.message);
+      throw Object.assign(new Error('Internal error'), { status: 500 });
+    }
+    const batch = rows ?? [];
+    for (const r of batch as any[]) {
+      const t = String(r?.entry_type ?? '').trim().toLowerCase();
+      if (t === 'expense') {
+        const litres = asNumber(r?.fuel_recharge_litres_used) ?? 0;
+        const kmCredited = asNumber(r?.fuel_recharge_km_credited_used) ?? 0;
+        if (litres > 0) totalRechargeLitres += litres;
+        if (kmCredited > 0) totalRechargeKmCredited += kmCredited;
+        if (
+          litres > 0 &&
+          kmCredited > 0 &&
+          (!lastRechargeRow || isAfterEntry(r, lastRechargeRow))
+        ) {
+          lastRechargeRow = r;
+        }
+      } else if (t === 'income') {
+        const kmDay = asInt(r?.fuel_km_travelled) ?? 0;
+        if (kmDay > 0) totalKmConsumed += kmDay;
+        const ymd = typeof r?.entry_date === 'string' ? r.entry_date : '';
+        if (ymd && ymd >= from7d && ymd <= todayYmd && kmDay > 0) {
+          sumKmLast7 += kmDay;
+          kmByDayLast7.set(ymd, (kmByDayLast7.get(ymd) ?? 0) + kmDay);
+        }
+        const kmEnd = asInt(r?.fuel_km_end);
+        if (kmEnd != null && kmEnd >= 0 && (!lastKmEndRow || isAfterEntry(r, lastKmEndRow))) {
+          lastKmEndRow = r;
+        }
+      }
+    }
+    if (batch.length < PAGE_SIZE) break;
+    scanOffset += PAGE_SIZE;
+    if (scanOffset > 200_000) {
+      console.error('[admin-api] fleet(manual) fuel summary exceeded guardrail', {
+        vehicleId: args.vehicleId,
+        scanOffset,
+      });
+      throw Object.assign(new Error('Internal error'), { status: 500 });
+    }
+  }
+
+  const ratio =
+    args.fuelRefLitres != null &&
+    args.fuelRefKm != null &&
+    Number.isFinite(args.fuelRefLitres) &&
+    Number.isFinite(args.fuelRefKm) &&
+    args.fuelRefLitres > 0 &&
+    args.fuelRefKm > 0
+      ? args.fuelRefLitres / args.fuelRefKm
+      : null;
+
+  const totalLitresConsumed = ratio == null ? null : totalKmConsumed * ratio;
+  const litresRemaining =
+    totalLitresConsumed == null ? null : totalRechargeLitres - totalLitresConsumed;
+
+  const kmRemaining = totalRechargeKmCredited - totalKmConsumed;
+
+  // % restant: strictly based on km credited (never litres), clamped to [0..100].
+  let percentRemaining: number | null = null;
+  if (totalRechargeKmCredited > 0) {
+    const raw = (kmRemaining / totalRechargeKmCredited) * 100;
+    const clamped = Math.min(100, Math.max(0, raw));
+    percentRemaining = Number.isFinite(clamped) ? clamped : 0;
+  } else {
+    percentRemaining = 0;
+  }
+
+  // Average km/day over the last 7 days, but only days with activity (>= 1 fuel income entry).
+  const activeDays = Array.from(kmByDayLast7.values()).filter((v) => v > 0).length;
+  const avgKmPerDay7 = activeDays >= 2 ? sumKmLast7 / activeDays : null;
+
+  let autonomyStatus: 'confortable' | 'limite' | 'insuffisante' = 'limite';
+  if (avgKmPerDay7 == null || avgKmPerDay7 <= 0) {
+    // Not enough signal -> neutral, decision remains with admin.
+    autonomyStatus = 'limite';
+  } else if (kmRemaining > avgKmPerDay7 * 2) {
+    autonomyStatus = 'confortable';
+  } else if (kmRemaining >= avgKmPerDay7) {
+    autonomyStatus = 'limite';
+  } else {
+    autonomyStatus = 'insuffisante';
+  }
+
+  return {
+    total_recharge_litres: totalRechargeLitres,
+    total_recharge_km_credited: totalRechargeKmCredited,
+    total_km_consumed: totalKmConsumed,
+    total_litres_consumed: totalLitresConsumed,
+    litres_remaining: litresRemaining,
+    km_remaining: kmRemaining,
+    percent_remaining: percentRemaining,
+    avg_km_per_day_7d: avgKmPerDay7,
+    last_recharge: lastRechargeRow
+      ? {
+          entry_id: String(lastRechargeRow.id ?? ''),
+          entry_date: String(lastRechargeRow.entry_date ?? ''),
+          litres_added: asNumber(lastRechargeRow.fuel_recharge_litres_used) ?? 0,
+          km_credited: asNumber(lastRechargeRow.fuel_recharge_km_credited_used) ?? 0,
+          cost_ariary: asInt(lastRechargeRow.amount_ariary) ?? 0,
+        }
+      : null,
+    last_km_end: lastKmEndRow
+      ? {
+          entry_id: String(lastKmEndRow.id ?? ''),
+          entry_date: String(lastKmEndRow.entry_date ?? ''),
+          km_end: asInt(lastKmEndRow.fuel_km_end) ?? 0,
+        }
+      : null,
+    autonomy_status: autonomyStatus,
+  };
 }
 
 function parseAllowlistEmails(): Set<string> {
@@ -711,7 +919,7 @@ async function handleFleetVehiclesList(req: Request, url: URL): Promise<Response
   let vQ = adminClient
     .from('fleet_vehicles')
     .select(
-      'id, plate_number, brand, model, status, purchase_price_ariary, purchase_date, amortization_months, target_resale_price_ariary, daily_rent_ariary, notes, created_at, updated_at',
+      'id, plate_number, brand, model, status, purchase_price_ariary, purchase_date, amortization_months, target_resale_price_ariary, daily_rent_ariary, notes, fuel_ref_litres, fuel_ref_km, created_at, updated_at',
       { count: 'exact' }
     )
     .order('created_at', { ascending: false })
@@ -814,7 +1022,7 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
     const { data: vehicle, error: vErr } = await adminClient
       .from('fleet_vehicles')
       .select(
-        'id, plate_number, brand, model, status, purchase_price_ariary, purchase_date, amortization_months, target_resale_price_ariary, daily_rent_ariary, notes, created_at, updated_at'
+        'id, plate_number, brand, model, status, purchase_price_ariary, purchase_date, amortization_months, target_resale_price_ariary, daily_rent_ariary, notes, fuel_ref_litres, fuel_ref_km, created_at, updated_at'
       )
       .eq('id', vehicleId)
       .maybeSingle();
@@ -894,7 +1102,7 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
     const { data: recentEntries, error: eErr } = await adminClient
       .from('fleet_vehicle_entries')
       .select(
-        'id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary'
+        'id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary, fuel_recharge_litres_used, fuel_recharge_km_credited_used'
       )
       .eq('vehicle_id', vehicleId)
       .is('deleted_at', null)
@@ -912,6 +1120,32 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
       vehicleId,
       count: (recentEntries ?? []).length,
     });
+
+    stage = 'compute fuel_summary (from entries)';
+    let fuelSummary: FleetFuelSummary | null = null;
+    try {
+      const refLitres =
+        typeof (vehicle as any).fuel_ref_litres === 'number' && Number.isFinite((vehicle as any).fuel_ref_litres)
+          ? ((vehicle as any).fuel_ref_litres as number)
+          : null;
+      const refKm =
+        typeof (vehicle as any).fuel_ref_km === 'number' && Number.isFinite((vehicle as any).fuel_ref_km)
+          ? ((vehicle as any).fuel_ref_km as number)
+          : null;
+      fuelSummary = await computeFleetFuelSummaryFromEntriesTable({
+        adminClient,
+        vehicleId,
+        fuelRefLitres: refLitres,
+        fuelRefKm: refKm,
+      });
+    } catch (e) {
+      // Keep the detail endpoint resilient: if something goes wrong, return the page without fuel summary.
+      console.error('[admin-api] fleet(manual) vehicle detail fuel_summary error', {
+        vehicleId,
+        message: e instanceof Error ? e.message : String(e),
+      });
+      fuelSummary = null;
+    }
 
     stage = 'compute financial_summary (entries scan)';
     let income = 0;
@@ -995,6 +1229,7 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
         active_assignment: active,
         assignment_history: assignmentHistory,
         recent_entries: recentEntries ?? [],
+        fuel_summary: fuelSummary,
         financial_summary: summary,
       },
       error: null,
@@ -1147,6 +1382,30 @@ async function handleFleetVehiclePatch(req: Request, vehicleIdRaw: string): Prom
   }
 
   if ('notes' in body) updateRow.notes = asNonEmptyString(body.notes);
+
+  if ('fuel_ref_litres' in body) {
+    const v = (body as any).fuel_ref_litres;
+    const n = v == null ? null : asNumber(v);
+    if (v != null && n == null) {
+      throw Object.assign(new Error('fuel_ref_litres must be a number'), { status: 400 });
+    }
+    if (n != null && n <= 0) {
+      throw Object.assign(new Error('fuel_ref_litres must be > 0'), { status: 400 });
+    }
+    updateRow.fuel_ref_litres = n;
+  }
+
+  if ('fuel_ref_km' in body) {
+    const v = (body as any).fuel_ref_km;
+    const n = v == null ? null : asInt(v);
+    if (v != null && n == null) {
+      throw Object.assign(new Error('fuel_ref_km must be an integer'), { status: 400 });
+    }
+    if (n != null && n <= 0) {
+      throw Object.assign(new Error('fuel_ref_km must be > 0'), { status: 400 });
+    }
+    updateRow.fuel_ref_km = n;
+  }
 
   if (Object.keys(updateRow).length === 0) {
     throw Object.assign(new Error('No updatable fields provided'), { status: 400 });
@@ -1319,7 +1578,7 @@ async function handleFleetVehicleEntriesList(req: Request, url: URL, vehicleIdRa
   const q = adminClient
     .from('fleet_vehicle_entries')
     .select(
-      'id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary',
+      'id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary, fuel_recharge_litres_used, fuel_recharge_km_credited_used',
       { count: 'exact' }
     )
     .eq('vehicle_id', vehicleId)
@@ -1358,8 +1617,9 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
     throw Object.assign(new Error("entry_type must be one of: income, expense"), { status: 400 });
   }
 
-  // Fuel is a calculated entry type (MVP): backend remains the source of truth.
-  // We compute & store the snapshot fields on the entry row.
+  // Fuel entries:
+  // - carburant + income  => daily consumption (computed from km + conso + price)
+  // - carburant + expense => recharge (stock credit; stores litres/km credited snapshots)
   const isFuel = categoryNorm === 'carburant';
 
   let entryType: 'income' | 'expense' = entryTypeRaw as 'income' | 'expense';
@@ -1369,6 +1629,8 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
   const fuelKmEndRaw = (body as Record<string, unknown>).fuel_km_end;
   const fuelPriceRaw = (body as Record<string, unknown>).fuel_price_per_litre_ariary_used;
   const fuelConsoRaw = (body as Record<string, unknown>).fuel_consumption_l_per_km_used;
+  const fuelRechargeLitresRaw = (body as Record<string, unknown>).fuel_recharge_litres_used;
+  const fuelRechargeKmCreditedRaw = (body as Record<string, unknown>).fuel_recharge_km_credited_used;
 
   let fuelKmStart: number | null = null;
   let fuelKmEnd: number | null = null;
@@ -1376,11 +1638,10 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
   let fuelPrice: number | null = null;
   let fuelConso: number | null = null;
   let fuelDue: number | null = null;
+  let fuelRechargeLitresUsed: number | null = null;
+  let fuelRechargeKmCreditedUsed: number | null = null;
 
-  if (isFuel) {
-    // Fuel is a calculated entry type (MVP): backend remains the source of truth for computed fields.
-    // We intentionally allow entry_type to be income or expense (UI defaults to income).
-
+  if (isFuel && entryType === 'income') {
     fuelKmStart = asInt(fuelKmStartRaw);
     if (fuelKmStart == null || fuelKmStart < 0) {
       throw Object.assign(new Error('fuel_km_start must be an integer >= 0'), { status: 400 });
@@ -1419,6 +1680,39 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
       throw Object.assign(new Error('fuel_due_ariary must be > 0'), { status: 400 });
     }
     amount = fuelDue;
+  } else if (isFuel && entryType === 'expense') {
+    // Recharge: litres/km credited are provided by the client and stored as-is (snapshots).
+    fuelRechargeLitresUsed = asNumber(fuelRechargeLitresRaw);
+    if (fuelRechargeLitresUsed == null || fuelRechargeLitresUsed <= 0) {
+      throw Object.assign(new Error('fuel_recharge_litres_used must be a number > 0'), { status: 400 });
+    }
+    fuelRechargeKmCreditedUsed = asNumber(fuelRechargeKmCreditedRaw);
+    if (fuelRechargeKmCreditedUsed == null || fuelRechargeKmCreditedUsed <= 0) {
+      throw Object.assign(new Error('fuel_recharge_km_credited_used must be a number > 0'), { status: 400 });
+    }
+    fuelPrice = asInt(fuelPriceRaw);
+    if (fuelPrice == null || fuelPrice <= 0) {
+      throw Object.assign(
+        new Error('fuel_price_per_litre_ariary_used must be an integer > 0'),
+        { status: 400 }
+      );
+    }
+    const consoNumRecharge =
+      typeof fuelConsoRaw === 'number'
+        ? fuelConsoRaw
+        : typeof fuelConsoRaw === 'string' && fuelConsoRaw.trim()
+          ? Number.parseFloat(fuelConsoRaw.trim())
+          : NaN;
+    fuelConso = Number.isFinite(consoNumRecharge) ? consoNumRecharge : null;
+    if (fuelConso == null || fuelConso <= 0) {
+      throw Object.assign(new Error('fuel_consumption_l_per_km_used must be a number > 0'), {
+        status: 400,
+      });
+    }
+    amount = asInt(body.amount_ariary);
+    if (amount == null || amount <= 0) {
+      throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+    }
   } else {
     amount = asInt(body.amount_ariary);
     if (amount == null || amount <= 0) {
@@ -1433,10 +1727,17 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
   if (odometerKm != null && odometerKm < 0) {
     throw Object.assign(new Error('odometer_km must be >= 0'), { status: 400 });
   }
+  if (isFuel && entryType === 'expense') {
+    if (odometerKm == null) {
+      throw Object.assign(new Error('odometer_km is required for fuel recharge'), { status: 400 });
+    }
+  }
   const entryDate = requireBodyDateYmd(body, 'entry_date');
   const label =
     isFuel && !asNonEmptyString(body.label)
-      ? 'Carburant'
+      ? entryType === 'expense'
+        ? 'Recharge carburant'
+        : 'Carburant'
       : requireBodyString(body, 'label');
   const notes = asNonEmptyString(body.notes);
 
@@ -1459,6 +1760,10 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
       fuel_price_per_litre_ariary_used: fuelPrice,
       fuel_consumption_l_per_km_used: fuelConso,
       fuel_due_ariary: fuelDue,
+
+      // Fuel recharge fields (nullable for non-recharge entries)
+      fuel_recharge_litres_used: fuelRechargeLitresUsed,
+      fuel_recharge_km_credited_used: fuelRechargeKmCreditedUsed,
     })
     .select('id')
     .maybeSingle();
@@ -1478,7 +1783,7 @@ async function requireFleetVehicleEntryExists(args: {
   const { data, error } = await args.adminClient
     .from('fleet_vehicle_entries')
     .select(
-      'id, vehicle_id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary'
+      'id, vehicle_id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary, fuel_recharge_litres_used, fuel_recharge_km_credited_used'
     )
     .eq('vehicle_id', args.vehicleId)
     .eq('id', args.entryId)
@@ -1546,8 +1851,8 @@ async function handleFleetVehicleEntryPatch(
     updateRow.category = nextCategory;
   }
 
-  if (isFuel) {
-    // Fuel: computed entry. Amount is always derived.
+  if (isFuel && nextEntryType === 'income') {
+    // Fuel consumption (income): computed entry. Amount is always derived.
     const label =
       ('label' in body ? asNonEmptyString(body.label) : null) ??
       (asNonEmptyString(existing.label) ?? 'Carburant');
@@ -1584,7 +1889,10 @@ async function handleFleetVehicleEntryPatch(
 
     const price = asInt(fuelPriceRaw);
     if (price == null || price <= 0) {
-      throw Object.assign(new Error('fuel_price_per_litre_ariary_used must be an integer > 0'), { status: 400 });
+      throw Object.assign(
+        new Error('fuel_price_per_litre_ariary_used must be an integer > 0'),
+        { status: 400 }
+      );
     }
 
     const consoNum =
@@ -1595,7 +1903,9 @@ async function handleFleetVehicleEntryPatch(
           : NaN;
     const conso = Number.isFinite(consoNum) ? consoNum : null;
     if (conso == null || conso <= 0) {
-      throw Object.assign(new Error('fuel_consumption_l_per_km_used must be a number > 0'), { status: 400 });
+      throw Object.assign(new Error('fuel_consumption_l_per_km_used must be a number > 0'), {
+        status: 400,
+      });
     }
 
     const dueRaw = travelled * conso * price;
@@ -1612,6 +1922,92 @@ async function handleFleetVehicleEntryPatch(
     updateRow.fuel_due_ariary = due;
     updateRow.amount_ariary = due;
     updateRow.odometer_km = null;
+
+    // Ensure recharge fields are null for consumption entries.
+    updateRow.fuel_recharge_litres_used = null;
+    updateRow.fuel_recharge_km_credited_used = null;
+  } else if (isFuel && nextEntryType === 'expense') {
+    // Fuel recharge (expense): amount is provided, plus litres/km credited snapshots.
+    const label =
+      ('label' in body ? asNonEmptyString(body.label) : null) ??
+      (asNonEmptyString(existing.label) ?? 'Recharge carburant');
+    updateRow.label = label;
+
+    const litresRaw =
+      'fuel_recharge_litres_used' in body
+        ? (body as any).fuel_recharge_litres_used
+        : (existing as any).fuel_recharge_litres_used;
+    const kmCreditedRaw =
+      'fuel_recharge_km_credited_used' in body
+        ? (body as any).fuel_recharge_km_credited_used
+        : (existing as any).fuel_recharge_km_credited_used;
+
+    const litres = asNumber(litresRaw);
+    if (litres == null || litres <= 0) {
+      throw Object.assign(new Error('fuel_recharge_litres_used must be a number > 0'), { status: 400 });
+    }
+    const kmCredited = asNumber(kmCreditedRaw);
+    if (kmCredited == null || kmCredited <= 0) {
+      throw Object.assign(new Error('fuel_recharge_km_credited_used must be a number > 0'), { status: 400 });
+    }
+
+    const amountRaw = 'amount_ariary' in body ? (body as any).amount_ariary : (existing as any).amount_ariary;
+    const amount = asInt(amountRaw);
+    if (amount == null || amount <= 0) {
+      throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+    }
+
+    updateRow.amount_ariary = amount;
+
+    updateRow.fuel_recharge_litres_used = litres;
+    updateRow.fuel_recharge_km_credited_used = kmCredited;
+
+    const odoRaw = 'odometer_km' in body ? (body as any).odometer_km : (existing as any).odometer_km;
+    const odo = odoRaw == null || odoRaw === '' ? null : asInt(odoRaw);
+    if (odoRaw != null && odoRaw !== '' && odo == null) {
+      throw Object.assign(new Error('odometer_km must be an integer'), { status: 400 });
+    }
+    if (odo == null || odo < 0) {
+      throw Object.assign(new Error('odometer_km is required for fuel recharge (integer >= 0)'), { status: 400 });
+    }
+    updateRow.odometer_km = odo;
+
+    const fuelPriceRaw =
+      'fuel_price_per_litre_ariary_used' in body
+        ? (body as any).fuel_price_per_litre_ariary_used
+        : (existing as any).fuel_price_per_litre_ariary_used;
+    const fuelConsoRaw =
+      'fuel_consumption_l_per_km_used' in body
+        ? (body as any).fuel_consumption_l_per_km_used
+        : (existing as any).fuel_consumption_l_per_km_used;
+
+    const price = asInt(fuelPriceRaw);
+    if (price == null || price <= 0) {
+      throw Object.assign(
+        new Error('fuel_price_per_litre_ariary_used must be an integer > 0'),
+        { status: 400 }
+      );
+    }
+    const consoNum =
+      typeof fuelConsoRaw === 'number'
+        ? fuelConsoRaw
+        : typeof fuelConsoRaw === 'string' && String(fuelConsoRaw).trim()
+          ? Number.parseFloat(String(fuelConsoRaw).trim())
+          : NaN;
+    const conso = Number.isFinite(consoNum) ? consoNum : null;
+    if (conso == null || conso <= 0) {
+      throw Object.assign(new Error('fuel_consumption_l_per_km_used must be a number > 0'), {
+        status: 400,
+      });
+    }
+    updateRow.fuel_price_per_litre_ariary_used = price;
+    updateRow.fuel_consumption_l_per_km_used = conso;
+
+    // Ensure consumption snapshot fields are null for recharge entries.
+    updateRow.fuel_km_start = null;
+    updateRow.fuel_km_end = null;
+    updateRow.fuel_km_travelled = null;
+    updateRow.fuel_due_ariary = null;
   } else {
     // Standard entry: keep amount editable (must be > 0).
     const amountRaw = 'amount_ariary' in body ? (body as any).amount_ariary : (existing as any).amount_ariary;
@@ -1643,6 +2039,8 @@ async function handleFleetVehicleEntryPatch(
     updateRow.fuel_price_per_litre_ariary_used = null;
     updateRow.fuel_consumption_l_per_km_used = null;
     updateRow.fuel_due_ariary = null;
+    updateRow.fuel_recharge_litres_used = null;
+    updateRow.fuel_recharge_km_credited_used = null;
   }
 
   const { error } = await adminClient.from('fleet_vehicle_entries').update(updateRow).eq('id', entryId);

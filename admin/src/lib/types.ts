@@ -206,6 +206,10 @@ export type FleetVehicleCreateInput = {
   target_resale_price_ariary?: number | null;
   daily_rent_ariary?: number | null;
   notes?: string | null;
+
+  // Fuel defaults (used as suggested reference values)
+  fuel_ref_litres?: number | null;
+  fuel_ref_km?: number | null;
 };
 
 export type FleetVehiclePatchInput = Partial<FleetVehicleCreateInput>;
@@ -246,6 +250,10 @@ export type FleetEntryRow = {
   fuel_price_per_litre_ariary_used?: number | null;
   fuel_consumption_l_per_km_used?: number | null;
   fuel_due_ariary?: number | null;
+
+  // Fuel recharge fields (for 'carburant' + 'expense')
+  fuel_recharge_litres_used?: number | null;
+  fuel_recharge_km_credited_used?: number | null;
 };
 
 export type FleetFinancialSummary = {
@@ -264,6 +272,29 @@ export type FleetFinancialSummary = {
 };
 
 export type FleetVehicleDetailResponse = {
+  fuel_summary?: {
+    total_recharge_litres: number;
+    total_recharge_km_credited: number;
+    total_km_consumed: number;
+    total_litres_consumed: number | null;
+    litres_remaining: number | null;
+    km_remaining: number;
+    percent_remaining: number | null; // 0..100 (can be <0 if stock negative)
+    avg_km_per_day_7d: number | null;
+    last_recharge: {
+      entry_id: string;
+      entry_date: string;
+      litres_added: number;
+      km_credited: number;
+      cost_ariary: number;
+    } | null;
+    last_km_end: {
+      entry_id: string;
+      entry_date: string;
+      km_end: number;
+    } | null;
+    autonomy_status: 'confortable' | 'limite' | 'insuffisante';
+  };
   vehicle: {
     id: string;
     plate_number: string;
@@ -276,6 +307,8 @@ export type FleetVehicleDetailResponse = {
     target_resale_price_ariary: number | null;
     daily_rent_ariary: number | null;
     notes: string | null;
+    fuel_ref_litres?: number | null;
+    fuel_ref_km?: number | null;
     created_at: string;
     updated_at: string;
   };
@@ -301,6 +334,10 @@ export type FleetEntryCreateInput = {
   fuel_price_per_litre_ariary_used?: number | null;
   fuel_consumption_l_per_km_used?: number | null;
   fuel_due_ariary?: number | null;
+
+  // Fuel recharge fields (for 'carburant' + 'expense')
+  fuel_recharge_litres_used?: number | null;
+  fuel_recharge_km_credited_used?: number | null;
 };
 
 export type FleetEntryPatchInput = Partial<{
@@ -317,6 +354,10 @@ export type FleetEntryPatchInput = Partial<{
   fuel_km_end: number;
   fuel_price_per_litre_ariary_used: number;
   fuel_consumption_l_per_km_used: number;
+
+  // Fuel recharge fields (for 'carburant' + 'expense')
+  fuel_recharge_litres_used: number;
+  fuel_recharge_km_credited_used: number;
 }>;
 
 export type FleetAssignmentCreateInput = {
