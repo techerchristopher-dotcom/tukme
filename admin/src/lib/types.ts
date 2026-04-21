@@ -231,6 +231,21 @@ export type FleetEntryRow = {
   label: string;
   notes: string | null;
   created_at: string;
+
+  // Audit / lifecycle (soft delete)
+  updated_at?: string;
+  updated_by?: string | null;
+  deleted_at?: string | null;
+  deleted_by?: string | null;
+  delete_reason?: string | null;
+
+  // Fuel snapshot fields (for calculated "carburant" entries)
+  fuel_km_start?: number | null;
+  fuel_km_end?: number | null;
+  fuel_km_travelled?: number | null;
+  fuel_price_per_litre_ariary_used?: number | null;
+  fuel_consumption_l_per_km_used?: number | null;
+  fuel_due_ariary?: number | null;
 };
 
 export type FleetFinancialSummary = {
@@ -278,7 +293,31 @@ export type FleetEntryCreateInput = {
   category: string;
   label: string;
   notes?: string | null;
+
+  // Fuel snapshot fields (for calculated "carburant" entries)
+  fuel_km_start?: number | null;
+  fuel_km_end?: number | null;
+  fuel_km_travelled?: number | null;
+  fuel_price_per_litre_ariary_used?: number | null;
+  fuel_consumption_l_per_km_used?: number | null;
+  fuel_due_ariary?: number | null;
 };
+
+export type FleetEntryPatchInput = Partial<{
+  entry_type: 'income' | 'expense';
+  amount_ariary: number;
+  odometer_km: number | null;
+  entry_date: string; // YYYY-MM-DD
+  category: string;
+  label: string;
+  notes: string | null;
+
+  // Fuel snapshot fields (for calculated "carburant" entries)
+  fuel_km_start: number;
+  fuel_km_end: number;
+  fuel_price_per_litre_ariary_used: number;
+  fuel_consumption_l_per_km_used: number;
+}>;
 
 export type FleetAssignmentCreateInput = {
   driver_id: string;

@@ -19,6 +19,7 @@ import type {
   FleetVehicleListItem,
   FleetVehiclePatchInput,
   FleetEntryCreateInput,
+  FleetEntryPatchInput,
   Paginated,
   PayoutRow,
   PlatformDailySummary,
@@ -364,6 +365,65 @@ async function callAdminDelete<T>(path: string): Promise<ApiResult<T>> {
   return { data: (env.data as T) ?? null, error: null } as ApiResult<T>;
 }
 
+async function callAdminDeleteJson<T>(args: {
+  path: string;
+  body?: Record<string, unknown>;
+}): Promise<ApiResult<T>> {
+  if (!BASE_URL) return { data: null, error: { message: 'Missing NEXT_PUBLIC_SUPABASE_URL' } };
+
+  const supabase = getSupabaseBrowser();
+  if (!supabase) {
+    return {
+      data: null,
+      error: { message: 'Missing NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY' },
+    };
+  }
+
+  const { data, error: sessErr } = await supabase.auth.getSession();
+  if (sessErr) return { data: null, error: { message: 'Session error' } };
+  const token = data.session?.access_token;
+  if (!token) return { data: null, error: { message: 'Not authenticated' } };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}${args.path}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(API_KEY ? { apikey: API_KEY } : {}),
+        ...(args.body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: args.body ? JSON.stringify(args.body) : undefined,
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      return { data: null, error: { message: 'Request timeout' } };
+    }
+    return { data: null, error: { message: 'Request failed' } };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const payload = await res.json().catch(() => null);
+  if (!res.ok) {
+    const fallback = `HTTP ${res.status}`;
+    return { data: null, error: parseApiError(payload, fallback) };
+  }
+  if (!payload || typeof payload !== 'object') {
+    return { data: null, error: { message: 'Invalid response' } };
+  }
+  const env = payload as Record<string, unknown>;
+  if (env.error != null && env.error !== false) {
+    return { data: null, error: parseApiError(env, 'Request failed') };
+  }
+  return { data: (env.data as T) ?? null, error: null } as ApiResult<T>;
+}
+
 export async function deactivateDriver(driverId: string): Promise<ApiResult<DeactivateDriverResponse>> {
   const id = driverId.trim();
   if (!isUuidString(id)) {
@@ -649,7 +709,54 @@ export async function createFleetVehicleEntry(
       category: input.category,
       label: input.label,
       notes: input.notes ?? null,
+
+      // Fuel snapshot fields (optional; used when category="carburant")
+      fuel_km_start: input.fuel_km_start ?? null,
+      fuel_km_end: input.fuel_km_end ?? null,
+      fuel_km_travelled: input.fuel_km_travelled ?? null,
+      fuel_price_per_litre_ariary_used: input.fuel_price_per_litre_ariary_used ?? null,
+      fuel_consumption_l_per_km_used: input.fuel_consumption_l_per_km_used ?? null,
+      fuel_due_ariary: input.fuel_due_ariary ?? null,
     },
+  });
+}
+
+export async function patchFleetVehicleEntry(
+  vehicleId: string,
+  entryId: string,
+  patch: FleetEntryPatchInput
+): Promise<ApiResult<{ ok: boolean }>> {
+  const vid = vehicleId.trim();
+  if (!isUuidString(vid)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  const eid = entryId.trim();
+  if (!isUuidString(eid)) {
+    return { data: null, error: { message: 'Identifiant écriture invalide' } };
+  }
+  return callAdminJsonWithMethod<{ ok: boolean }>({
+    path: `/fleet/vehicles/${encodeURIComponent(vid)}/entries/${encodeURIComponent(eid)}`,
+    method: 'PATCH',
+    body: patch as Record<string, unknown>,
+  });
+}
+
+export async function softDeleteFleetVehicleEntry(
+  vehicleId: string,
+  entryId: string,
+  input?: { delete_reason?: string | null }
+): Promise<ApiResult<{ ok: boolean }>> {
+  const vid = vehicleId.trim();
+  if (!isUuidString(vid)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  const eid = entryId.trim();
+  if (!isUuidString(eid)) {
+    return { data: null, error: { message: 'Identifiant écriture invalide' } };
+  }
+  return callAdminDeleteJson<{ ok: boolean }>({
+    path: `/fleet/vehicles/${encodeURIComponent(vid)}/entries/${encodeURIComponent(eid)}`,
+    body: input?.delete_reason ? { delete_reason: input.delete_reason } : undefined,
   });
 }
 

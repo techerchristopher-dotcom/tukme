@@ -598,6 +598,7 @@ async function computeFleetVehicleEntriesAggregatesFromTable(args: {
       .from('fleet_vehicle_entries')
       .select('entry_type, amount_ariary')
       .eq('vehicle_id', args.vehicleId)
+      .is('deleted_at', null)
       .order('created_at', { ascending: true })
       .range(scanOffset, scanOffset + PAGE_SIZE - 1);
     if (scanErr) {
@@ -892,8 +893,11 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
     stage = 'read recent_entries';
     const { data: recentEntries, error: eErr } = await adminClient
       .from('fleet_vehicle_entries')
-      .select('id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at')
+      .select(
+        'id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary'
+      )
       .eq('vehicle_id', vehicleId)
+      .is('deleted_at', null)
       .order('entry_date', { ascending: false })
       .order('created_at', { ascending: false })
       .limit(20);
@@ -1314,10 +1318,12 @@ async function handleFleetVehicleEntriesList(req: Request, url: URL, vehicleIdRa
 
   const q = adminClient
     .from('fleet_vehicle_entries')
-    .select('id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at', {
-      count: 'exact',
-    })
+    .select(
+      'id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary',
+      { count: 'exact' }
+    )
     .eq('vehicle_id', vehicleId)
+    .is('deleted_at', null)
     .order('entry_date', { ascending: false })
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
@@ -1344,13 +1350,80 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
   await requireFleetVehicleExists(adminClient, vehicleId);
   const body = await readJsonBody(req);
 
-  const entryType = asNonEmptyString(body.entry_type)?.toLowerCase() ?? null;
-  if (entryType !== 'income' && entryType !== 'expense') {
+  const category = requireBodyString(body, 'category');
+  const categoryNorm = category.trim().toLowerCase();
+
+  const entryTypeRaw = asNonEmptyString(body.entry_type)?.toLowerCase() ?? null;
+  if (entryTypeRaw !== 'income' && entryTypeRaw !== 'expense') {
     throw Object.assign(new Error("entry_type must be one of: income, expense"), { status: 400 });
   }
-  const amount = asInt(body.amount_ariary);
-  if (amount == null || amount <= 0) {
-    throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+
+  // Fuel is a calculated entry type (MVP): backend remains the source of truth.
+  // We compute & store the snapshot fields on the entry row.
+  const isFuel = categoryNorm === 'carburant';
+
+  let entryType: 'income' | 'expense' = entryTypeRaw as 'income' | 'expense';
+  let amount: number | null = null;
+
+  const fuelKmStartRaw = (body as Record<string, unknown>).fuel_km_start;
+  const fuelKmEndRaw = (body as Record<string, unknown>).fuel_km_end;
+  const fuelPriceRaw = (body as Record<string, unknown>).fuel_price_per_litre_ariary_used;
+  const fuelConsoRaw = (body as Record<string, unknown>).fuel_consumption_l_per_km_used;
+
+  let fuelKmStart: number | null = null;
+  let fuelKmEnd: number | null = null;
+  let fuelKmTravelled: number | null = null;
+  let fuelPrice: number | null = null;
+  let fuelConso: number | null = null;
+  let fuelDue: number | null = null;
+
+  if (isFuel) {
+    // Fuel is a calculated entry type (MVP): backend remains the source of truth for computed fields.
+    // We intentionally allow entry_type to be income or expense (UI defaults to income).
+
+    fuelKmStart = asInt(fuelKmStartRaw);
+    if (fuelKmStart == null || fuelKmStart < 0) {
+      throw Object.assign(new Error('fuel_km_start must be an integer >= 0'), { status: 400 });
+    }
+    fuelKmEnd = asInt(fuelKmEndRaw);
+    if (fuelKmEnd == null || fuelKmEnd < 0) {
+      throw Object.assign(new Error('fuel_km_end must be an integer >= 0'), { status: 400 });
+    }
+    if (fuelKmEnd < fuelKmStart) {
+      throw Object.assign(new Error('fuel_km_end must be >= fuel_km_start'), { status: 400 });
+    }
+    fuelKmTravelled = fuelKmEnd - fuelKmStart;
+    if (fuelKmTravelled <= 0) {
+      throw Object.assign(new Error('fuel_km_travelled must be > 0'), { status: 400 });
+    }
+
+    fuelPrice = asInt(fuelPriceRaw);
+    if (fuelPrice == null || fuelPrice <= 0) {
+      throw Object.assign(new Error('fuel_price_per_litre_ariary_used must be an integer > 0'), { status: 400 });
+    }
+
+    const consoNum =
+      typeof fuelConsoRaw === 'number'
+        ? fuelConsoRaw
+        : typeof fuelConsoRaw === 'string' && fuelConsoRaw.trim()
+          ? Number.parseFloat(fuelConsoRaw.trim())
+          : NaN;
+    fuelConso = Number.isFinite(consoNum) ? consoNum : null;
+    if (fuelConso == null || fuelConso <= 0) {
+      throw Object.assign(new Error('fuel_consumption_l_per_km_used must be a number > 0'), { status: 400 });
+    }
+
+    const dueRaw = fuelKmTravelled * fuelConso * fuelPrice;
+    fuelDue = Number.isFinite(dueRaw) ? Math.round(dueRaw) : null;
+    if (fuelDue == null || fuelDue <= 0) {
+      throw Object.assign(new Error('fuel_due_ariary must be > 0'), { status: 400 });
+    }
+    amount = fuelDue;
+  } else {
+    amount = asInt(body.amount_ariary);
+    if (amount == null || amount <= 0) {
+      throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+    }
   }
   const odometerKmRaw = (body as Record<string, unknown>).odometer_km;
   const odometerKm = odometerKmRaw == null ? null : asInt(odometerKmRaw);
@@ -1361,8 +1434,10 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
     throw Object.assign(new Error('odometer_km must be >= 0'), { status: 400 });
   }
   const entryDate = requireBodyDateYmd(body, 'entry_date');
-  const category = requireBodyString(body, 'category');
-  const label = requireBodyString(body, 'label');
+  const label =
+    isFuel && !asNonEmptyString(body.label)
+      ? 'Carburant'
+      : requireBodyString(body, 'label');
   const notes = asNonEmptyString(body.notes);
 
   const { data, error } = await adminClient
@@ -1376,6 +1451,14 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
       label,
       entry_date: entryDate,
       notes: notes ?? null,
+
+      // Fuel snapshot fields (nullable for non-fuel entries)
+      fuel_km_start: fuelKmStart,
+      fuel_km_end: fuelKmEnd,
+      fuel_km_travelled: fuelKmTravelled,
+      fuel_price_per_litre_ariary_used: fuelPrice,
+      fuel_consumption_l_per_km_used: fuelConso,
+      fuel_due_ariary: fuelDue,
     })
     .select('id')
     .maybeSingle();
@@ -1384,6 +1467,231 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
     return jsonResponse(400, { data: null, error: { message: error.message } });
   }
   return jsonResponse(200, { data: { entry_id: data?.id ?? null }, error: null });
+}
+
+async function requireFleetVehicleEntryExists(args: {
+  adminClient: ReturnType<typeof createClient>;
+  vehicleId: string;
+  entryId: string;
+  allowDeleted?: boolean;
+}): Promise<Record<string, unknown>> {
+  const { data, error } = await args.adminClient
+    .from('fleet_vehicle_entries')
+    .select(
+      'id, vehicle_id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary'
+    )
+    .eq('vehicle_id', args.vehicleId)
+    .eq('id', args.entryId)
+    .maybeSingle();
+  if (error) {
+    console.error('[admin-api] fleet(manual) entry exists check', error.message);
+    throw Object.assign(new Error('Internal error'), { status: 500 });
+  }
+  if (!data?.id) {
+    throw Object.assign(new Error('Entry not found'), { status: 404 });
+  }
+  const deletedAt = (data as any).deleted_at;
+  if (!args.allowDeleted && deletedAt != null) {
+    throw Object.assign(new Error('Entry not found'), { status: 404 });
+  }
+  return data as unknown as Record<string, unknown>;
+}
+
+async function handleFleetVehicleEntryPatch(
+  req: Request,
+  vehicleIdRaw: string,
+  entryIdRaw: string
+): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  const entryId = normalizePathId(entryIdRaw);
+  if (!isUuid(vehicleId)) return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  if (!isUuid(entryId)) return jsonResponse(400, { data: null, error: { message: 'Invalid entryId' } });
+
+  const { adminClient, userEmail } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+
+  const existing = await requireFleetVehicleEntryExists({ adminClient, vehicleId, entryId });
+  const body = await readJsonBody(req);
+
+  const nextCategory = ('category' in body ? asNonEmptyString(body.category) : null) ?? String(existing.category ?? '');
+  const categoryNorm = nextCategory.trim().toLowerCase();
+  const isFuel = categoryNorm === 'carburant';
+
+  const nextEntryType =
+    ('entry_type' in body ? asNonEmptyString(body.entry_type)?.toLowerCase() : null) ??
+    String(existing.entry_type ?? '');
+  if (nextEntryType !== 'income' && nextEntryType !== 'expense') {
+    throw Object.assign(new Error("entry_type must be one of: income, expense"), { status: 400 });
+  }
+
+  const nextEntryDate =
+    'entry_date' in body ? requireBodyDateYmd(body, 'entry_date') : String(existing.entry_date ?? '');
+
+  const nextNotes =
+    'notes' in body ? asNonEmptyString(body.notes) : (existing.notes as unknown as string | null | undefined) ?? null;
+
+  const updateRow: Record<string, unknown> = {
+    entry_type: nextEntryType,
+    entry_date: nextEntryDate,
+    notes: nextNotes ?? null,
+    updated_by: userEmail,
+  };
+
+  // Allow editing category / label for standard entries; for fuel we keep a stable label by default.
+  if ('category' in body) {
+    const c = asNonEmptyString(body.category);
+    if (!c) throw Object.assign(new Error('category must be a non-empty string'), { status: 400 });
+    updateRow.category = c;
+  } else {
+    updateRow.category = nextCategory;
+  }
+
+  if (isFuel) {
+    // Fuel: computed entry. Amount is always derived.
+    const label =
+      ('label' in body ? asNonEmptyString(body.label) : null) ??
+      (asNonEmptyString(existing.label) ?? 'Carburant');
+    updateRow.label = label;
+
+    const fuelKmStartRaw =
+      'fuel_km_start' in body ? (body as any).fuel_km_start : (existing as any).fuel_km_start;
+    const fuelKmEndRaw =
+      'fuel_km_end' in body ? (body as any).fuel_km_end : (existing as any).fuel_km_end;
+    const fuelPriceRaw =
+      'fuel_price_per_litre_ariary_used' in body
+        ? (body as any).fuel_price_per_litre_ariary_used
+        : (existing as any).fuel_price_per_litre_ariary_used;
+    const fuelConsoRaw =
+      'fuel_consumption_l_per_km_used' in body
+        ? (body as any).fuel_consumption_l_per_km_used
+        : (existing as any).fuel_consumption_l_per_km_used;
+
+    const start = asInt(fuelKmStartRaw);
+    if (start == null || start < 0) {
+      throw Object.assign(new Error('fuel_km_start must be an integer >= 0'), { status: 400 });
+    }
+    const end = asInt(fuelKmEndRaw);
+    if (end == null || end < 0) {
+      throw Object.assign(new Error('fuel_km_end must be an integer >= 0'), { status: 400 });
+    }
+    if (end < start) {
+      throw Object.assign(new Error('fuel_km_end must be >= fuel_km_start'), { status: 400 });
+    }
+    const travelled = end - start;
+    if (travelled <= 0) {
+      throw Object.assign(new Error('fuel_km_travelled must be > 0'), { status: 400 });
+    }
+
+    const price = asInt(fuelPriceRaw);
+    if (price == null || price <= 0) {
+      throw Object.assign(new Error('fuel_price_per_litre_ariary_used must be an integer > 0'), { status: 400 });
+    }
+
+    const consoNum =
+      typeof fuelConsoRaw === 'number'
+        ? fuelConsoRaw
+        : typeof fuelConsoRaw === 'string' && fuelConsoRaw.trim()
+          ? Number.parseFloat(fuelConsoRaw.trim())
+          : NaN;
+    const conso = Number.isFinite(consoNum) ? consoNum : null;
+    if (conso == null || conso <= 0) {
+      throw Object.assign(new Error('fuel_consumption_l_per_km_used must be a number > 0'), { status: 400 });
+    }
+
+    const dueRaw = travelled * conso * price;
+    const due = Number.isFinite(dueRaw) ? Math.round(dueRaw) : null;
+    if (due == null || due <= 0) {
+      throw Object.assign(new Error('fuel_due_ariary must be > 0'), { status: 400 });
+    }
+
+    updateRow.fuel_km_start = start;
+    updateRow.fuel_km_end = end;
+    updateRow.fuel_km_travelled = travelled;
+    updateRow.fuel_price_per_litre_ariary_used = price;
+    updateRow.fuel_consumption_l_per_km_used = conso;
+    updateRow.fuel_due_ariary = due;
+    updateRow.amount_ariary = due;
+    updateRow.odometer_km = null;
+  } else {
+    // Standard entry: keep amount editable (must be > 0).
+    const amountRaw = 'amount_ariary' in body ? (body as any).amount_ariary : (existing as any).amount_ariary;
+    const amount = asInt(amountRaw);
+    if (amount == null || amount <= 0) {
+      throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+    }
+    updateRow.amount_ariary = amount;
+
+    if ('odometer_km' in body) {
+      const v = (body as any).odometer_km;
+      const n = v == null ? null : asInt(v);
+      if (v != null && n == null) throw Object.assign(new Error('odometer_km must be an integer'), { status: 400 });
+      if (n != null && n < 0) throw Object.assign(new Error('odometer_km must be >= 0'), { status: 400 });
+      updateRow.odometer_km = n;
+    } else {
+      updateRow.odometer_km = (existing as any).odometer_km ?? null;
+    }
+
+    const label =
+      ('label' in body ? asNonEmptyString(body.label) : null) ?? (asNonEmptyString(existing.label) ?? null);
+    if (!label) throw Object.assign(new Error('label is required'), { status: 400 });
+    updateRow.label = label;
+
+    // If entry is not fuel, keep fuel snapshot fields null to avoid stale/ambiguous data.
+    updateRow.fuel_km_start = null;
+    updateRow.fuel_km_end = null;
+    updateRow.fuel_km_travelled = null;
+    updateRow.fuel_price_per_litre_ariary_used = null;
+    updateRow.fuel_consumption_l_per_km_used = null;
+    updateRow.fuel_due_ariary = null;
+  }
+
+  const { error } = await adminClient.from('fleet_vehicle_entries').update(updateRow).eq('id', entryId);
+  if (error) {
+    console.error('[admin-api] fleet(manual) entry patch', error.message);
+    return jsonResponse(400, { data: null, error: { message: error.message } });
+  }
+
+  return jsonResponse(200, { data: { ok: true }, error: null });
+}
+
+async function handleFleetVehicleEntrySoftDelete(
+  req: Request,
+  vehicleIdRaw: string,
+  entryIdRaw: string
+): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  const entryId = normalizePathId(entryIdRaw);
+  if (!isUuid(vehicleId)) return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  if (!isUuid(entryId)) return jsonResponse(400, { data: null, error: { message: 'Invalid entryId' } });
+
+  const { adminClient, userEmail } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+  await requireFleetVehicleEntryExists({ adminClient, vehicleId, entryId, allowDeleted: false });
+
+  let deleteReason: string | null = null;
+  // Accept optional JSON body for a reason (fetch DELETE body is allowed in practice).
+  try {
+    const body = await readJsonBody(req);
+    deleteReason = asNonEmptyString(body.delete_reason);
+  } catch {
+    // ignore: no body
+  }
+
+  const { error } = await adminClient
+    .from('fleet_vehicle_entries')
+    .update({
+      deleted_at: new Date().toISOString(),
+      deleted_by: userEmail,
+      delete_reason: deleteReason,
+      updated_by: userEmail,
+    })
+    .eq('id', entryId);
+  if (error) {
+    console.error('[admin-api] fleet(manual) entry soft delete', error.message);
+    return jsonResponse(400, { data: null, error: { message: error.message } });
+  }
+
+  return jsonResponse(200, { data: { ok: true }, error: null });
 }
 
 async function handleFleetVehicleFinancialSummary(req: Request, _url: URL, vehicleIdRaw: string): Promise<Response> {
@@ -1885,6 +2193,14 @@ Deno.serve(async (req) => {
         const vehicleId = normalizePathId(rest[1] ?? '');
         if (rest.length === 2 && req.method === 'GET') return await handleFleetVehicleGet(req, url, vehicleId);
         if (rest.length === 2 && req.method === 'PATCH') return await handleFleetVehiclePatch(req, vehicleId);
+        if (rest.length === 4 && rest[2] === 'entries' && req.method === 'PATCH') {
+          const entryId = normalizePathId(rest[3] ?? '');
+          return await handleFleetVehicleEntryPatch(req, vehicleId, entryId);
+        }
+        if (rest.length === 4 && rest[2] === 'entries' && req.method === 'DELETE') {
+          const entryId = normalizePathId(rest[3] ?? '');
+          return await handleFleetVehicleEntrySoftDelete(req, vehicleId, entryId);
+        }
         if (rest.length === 3 && rest[2] === 'assignment' && req.method === 'GET') {
           return await handleFleetVehicleGetAssignment(req, vehicleId);
         }

@@ -10,17 +10,21 @@ import {
   createFleetVehicleEntry,
   getDriversDailySummary,
   getFleetVehicle,
+  patchFleetVehicleEntry,
   patchFleetVehicle,
   setFleetVehicleAssignment,
+  softDeleteFleetVehicleEntry,
 } from '@/lib/adminApi';
 import { useBusinessDate } from '@/hooks/useBusinessDate';
 import { formatAriary } from '@/lib/money';
 import type {
   DriverDailySummaryRow,
+  FleetEntryPatchInput,
   FleetEntryCreateInput,
   FleetFinancialSummary,
   FleetVehicleCreateInput,
   FleetVehicleDetailResponse,
+  FleetEntryRow,
   FleetVehicleStatus,
 } from '@/lib/types';
 import { isUuidString, normalizeUuidParam } from '@/lib/uuid';
@@ -65,8 +69,71 @@ function parseIntOrNull(s: string): number | null {
   return Number.isInteger(n) ? n : null;
 }
 
+function parseFloatOrNull(s: string): number | null {
+  const t = s.trim().replace(',', '.');
+  if (!t) return null;
+  const n = Number.parseFloat(t);
+  return Number.isFinite(n) ? n : null;
+}
+
 function digitsOnly(s: string): string {
   return s.replace(/[^\d]/g, '');
+}
+
+function computeFuelDerived(args: {
+  kmStartText: string;
+  kmEndText: string;
+  priceText: string;
+  consumptionText: string;
+}): {
+  kmDay: number | null;
+  dueAriary: number | null;
+  error: string | null;
+} {
+  const a = digitsOnly(args.kmStartText);
+  const b = digitsOnly(args.kmEndText);
+  const p = digitsOnly(args.priceText);
+  const c = args.consumptionText;
+
+  // Incomplete input → neutral state (no error yet).
+  if (!a || !b) {
+    return { kmDay: null, dueAriary: null, error: null };
+  }
+
+  const start = Number.parseInt(a, 10);
+  const end = Number.parseInt(b, 10);
+  if (!Number.isInteger(start) || !Number.isInteger(end)) {
+    return { kmDay: null, dueAriary: null, error: null };
+  }
+  if (start < 0 || end < 0) {
+    return { kmDay: null, dueAriary: null, error: 'Km doit être ≥ 0.' };
+  }
+  if (end < start) {
+    return { kmDay: null, dueAriary: null, error: 'Km retour doit être ≥ km départ.' };
+  }
+  const kmDay = end - start;
+  if (kmDay <= 0) {
+    return { kmDay: null, dueAriary: null, error: 'Km du jour doit être > 0.' };
+  }
+
+  // Still incomplete → keep kmDay visible but no due until price+consumption are valid.
+  if (!p) {
+    return { kmDay, dueAriary: null, error: null };
+  }
+  const price = Number.parseInt(p, 10);
+  if (!Number.isInteger(price) || price <= 0) {
+    return { kmDay, dueAriary: null, error: null };
+  }
+
+  const conso = parseFloatOrNull(c);
+  if (conso == null || conso <= 0) {
+    return { kmDay, dueAriary: null, error: null };
+  }
+
+  const raw = kmDay * conso * price;
+  if (!Number.isFinite(raw)) return { kmDay, dueAriary: null, error: null };
+  const due = Math.round(raw);
+  return { kmDay, dueAriary: due > 0 ? due : null, error: null };
 }
 
 function formatIntFr(n: number): string {
@@ -117,6 +184,10 @@ export default function FleetVehicleDetailPage() {
   const [entryError, setEntryError] = useState<string | null>(null);
   const [entryAmountText, setEntryAmountText] = useState<string>('');
   const [entryOdometerText, setEntryOdometerText] = useState<string>('');
+  const [fuelKmStartText, setFuelKmStartText] = useState<string>('');
+  const [fuelKmEndText, setFuelKmEndText] = useState<string>('');
+  const [fuelPriceText, setFuelPriceText] = useState<string>('');
+  const [fuelConsumptionText, setFuelConsumptionText] = useState<string>('');
   const [entryForm, setEntryForm] = useState<FleetEntryCreateInput>({
     entry_type: 'expense',
     amount_ariary: 0,
@@ -126,6 +197,20 @@ export default function FleetVehicleDetailPage() {
     label: '',
     notes: '',
   });
+
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailMode, setDetailMode] = useState<'read' | 'edit'>('read');
+  const [detailSubmitting, setDetailSubmitting] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [selectedEntry, setSelectedEntry] = useState<FleetEntryRow | null>(null);
+
+  const [editAmountText, setEditAmountText] = useState<string>('');
+  const [editOdometerText, setEditOdometerText] = useState<string>('');
+  const [editFuelKmStartText, setEditFuelKmStartText] = useState<string>('');
+  const [editFuelKmEndText, setEditFuelKmEndText] = useState<string>('');
+  const [editFuelPriceText, setEditFuelPriceText] = useState<string>('');
+  const [editFuelConsumptionText, setEditFuelConsumptionText] = useState<string>('');
+  const [entryEditForm, setEntryEditForm] = useState<FleetEntryPatchInput | null>(null);
 
   const [assignOpen, setAssignOpen] = useState(false);
   const [assignSubmitting, setAssignSubmitting] = useState(false);
@@ -176,16 +261,17 @@ export default function FleetVehicleDetailPage() {
   }, [vehicleId, refreshSeq]);
 
   useEffect(() => {
-    if (!editOpen && !entryOpen && !assignOpen) return;
+    if (!editOpen && !entryOpen && !assignOpen && !detailOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (!editSubmitting && editOpen) setEditOpen(false);
       if (!entrySubmitting && entryOpen) setEntryOpen(false);
       if (!assignSubmitting && assignOpen) setAssignOpen(false);
+      if (!detailSubmitting && detailOpen) setDetailOpen(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editOpen, entryOpen, assignOpen, editSubmitting, entrySubmitting, assignSubmitting]);
+  }, [editOpen, entryOpen, assignOpen, detailOpen, editSubmitting, entrySubmitting, assignSubmitting, detailSubmitting]);
 
   function openEdit() {
     if (!data) return;
@@ -235,6 +321,20 @@ export default function FleetVehicleDetailPage() {
     setEntryError(null);
     setEntryAmountText('');
     setEntryOdometerText('');
+    setFuelKmStartText('');
+    setFuelKmEndText('');
+    setFuelPriceText('');
+    setFuelConsumptionText('');
+    // Prefill fuel km start from last known (if any).
+    const lastKm =
+      data?.recent_entries?.find((e) => typeof e.fuel_km_end === 'number' && Number.isFinite(e.fuel_km_end))
+        ?.fuel_km_end ??
+      data?.recent_entries?.find((e) => typeof e.odometer_km === 'number' && Number.isFinite(e.odometer_km))
+        ?.odometer_km ??
+      null;
+    if (lastKm != null) {
+      setFuelKmStartText(formatIntFr(lastKm));
+    }
     setEntryForm({
       entry_type: 'expense',
       amount_ariary: 0,
@@ -247,10 +347,112 @@ export default function FleetVehicleDetailPage() {
     setEntryOpen(true);
   }
 
+  const isFuelEntry = entryForm.category === 'carburant';
+
+  const fuelInlineError = useMemo(() => {
+    if (!isFuelEntry) return null;
+    return computeFuelDerived({
+      kmStartText: fuelKmStartText,
+      kmEndText: fuelKmEndText,
+      priceText: fuelPriceText,
+      consumptionText: fuelConsumptionText,
+    }).error;
+  }, [isFuelEntry, fuelKmStartText, fuelKmEndText]);
+
+  const fuelKmDay = useMemo(() => {
+    if (!isFuelEntry) return null;
+    return computeFuelDerived({
+      kmStartText: fuelKmStartText,
+      kmEndText: fuelKmEndText,
+      priceText: fuelPriceText,
+      consumptionText: fuelConsumptionText,
+    }).kmDay;
+  }, [isFuelEntry, fuelKmStartText, fuelKmEndText]);
+
+  const fuelDueAriary = useMemo(() => {
+    if (!isFuelEntry) return null;
+    return computeFuelDerived({
+      kmStartText: fuelKmStartText,
+      kmEndText: fuelKmEndText,
+      priceText: fuelPriceText,
+      consumptionText: fuelConsumptionText,
+    }).dueAriary;
+  }, [isFuelEntry, fuelKmStartText, fuelKmEndText, fuelPriceText, fuelConsumptionText]);
+
+  const fuelCanSubmit = isFuelEntry ? fuelDueAriary != null && !fuelInlineError : true;
+
   async function submitEntry(e: FormEvent) {
     e.preventDefault();
     if (!data) return;
     setEntryError(null);
+
+    if (isFuelEntry) {
+      const startDigits = digitsOnly(fuelKmStartText);
+      const endDigits = digitsOnly(fuelKmEndText);
+      const start = startDigits ? Number.parseInt(startDigits, 10) : null;
+      const end = endDigits ? Number.parseInt(endDigits, 10) : null;
+      if (start == null || !Number.isInteger(start) || start < 0) {
+        setEntryError('Km départ invalide (entier >= 0).');
+        return;
+      }
+      if (end == null || !Number.isInteger(end) || end < 0) {
+        setEntryError('Km retour invalide (entier >= 0).');
+        return;
+      }
+      if (end < start) {
+        setEntryError('Km retour doit être ≥ km départ.');
+        return;
+      }
+      const kmDay = end - start;
+      if (kmDay <= 0) {
+        setEntryError('Km du jour doit être > 0.');
+        return;
+      }
+      const priceDigits = digitsOnly(fuelPriceText);
+      const price = priceDigits ? Number.parseInt(priceDigits, 10) : null;
+      if (price == null || !Number.isInteger(price) || price <= 0) {
+        setEntryError('Prix litre invalide (entier > 0).');
+        return;
+      }
+      const conso = parseFloatOrNull(fuelConsumptionText);
+      if (conso == null || !Number.isFinite(conso) || conso <= 0) {
+        setEntryError('Consommation invalide (nombre > 0).');
+        return;
+      }
+      const rawDue = kmDay * conso * price;
+      const due = Number.isFinite(rawDue) ? Math.round(rawDue) : 0;
+      if (!Number.isInteger(due) || due <= 0) {
+        setEntryError('Carburant dû invalide.');
+        return;
+      }
+
+      setEntrySubmitting(true);
+      const res = await createFleetVehicleEntry(data.vehicle.id, {
+        entry_type: entryForm.entry_type,
+        amount_ariary: due,
+        odometer_km: null,
+        entry_date: entryForm.entry_date,
+        category: 'carburant',
+        label: 'Carburant',
+        notes: entryForm.notes?.trim() ? entryForm.notes.trim() : null,
+
+        fuel_km_start: start,
+        fuel_km_end: end,
+        fuel_km_travelled: kmDay,
+        fuel_price_per_litre_ariary_used: price,
+        fuel_consumption_l_per_km_used: conso,
+        fuel_due_ariary: due,
+      });
+      setEntrySubmitting(false);
+      if (res.error) {
+        setEntryError(res.error.message);
+        return;
+      }
+      setEntryOpen(false);
+      setRefreshSeq((s) => s + 1);
+      return;
+    }
+
     const amount = Number.parseInt(digitsOnly(entryAmountText || String(entryForm.amount_ariary || '')), 10) || 0;
     if (!Number.isInteger(amount) || amount <= 0) {
       setEntryError('Montant invalide (entier > 0).');
@@ -336,6 +538,172 @@ export default function FleetVehicleDetailPage() {
   const assignmentHistory = data?.assignment_history ?? [];
   const recentEntries = data?.recent_entries ?? [];
   const activeAssignment = data?.active_assignment ?? null;
+
+  function openEntryDetail(e: FleetEntryRow) {
+    setSelectedEntry(e);
+    setDetailError(null);
+    setDetailMode('read');
+    setEntryEditForm(null);
+    setEditAmountText('');
+    setEditOdometerText('');
+    setEditFuelKmStartText('');
+    setEditFuelKmEndText('');
+    setEditFuelPriceText('');
+    setEditFuelConsumptionText('');
+    setDetailOpen(true);
+  }
+
+  function beginEditEntry() {
+    if (!selectedEntry) return;
+    setDetailError(null);
+    setDetailMode('edit');
+
+    const isFuel = selectedEntry.category?.trim().toLowerCase() === 'carburant';
+    setEntryEditForm({
+      entry_type: selectedEntry.entry_type,
+      entry_date: selectedEntry.entry_date,
+      category: selectedEntry.category,
+      label: selectedEntry.label,
+      notes: selectedEntry.notes ?? null,
+      ...(isFuel
+        ? {
+            fuel_km_start: selectedEntry.fuel_km_start ?? 0,
+            fuel_km_end: selectedEntry.fuel_km_end ?? 0,
+            fuel_price_per_litre_ariary_used: selectedEntry.fuel_price_per_litre_ariary_used ?? 0,
+            fuel_consumption_l_per_km_used: selectedEntry.fuel_consumption_l_per_km_used ?? 0,
+          }
+        : {
+            amount_ariary: selectedEntry.amount_ariary,
+            odometer_km: selectedEntry.odometer_km ?? null,
+          }),
+    });
+
+    if (!isFuel) {
+      setEditAmountText(formatIntFr(selectedEntry.amount_ariary));
+      setEditOdometerText(
+        selectedEntry.odometer_km == null ? '' : formatIntFr(selectedEntry.odometer_km)
+      );
+    } else {
+      setEditFuelKmStartText(
+        selectedEntry.fuel_km_start == null ? '' : formatIntFr(selectedEntry.fuel_km_start)
+      );
+      setEditFuelKmEndText(
+        selectedEntry.fuel_km_end == null ? '' : formatIntFr(selectedEntry.fuel_km_end)
+      );
+      setEditFuelPriceText(
+        selectedEntry.fuel_price_per_litre_ariary_used == null
+          ? ''
+          : formatIntFr(selectedEntry.fuel_price_per_litre_ariary_used)
+      );
+      setEditFuelConsumptionText(
+        selectedEntry.fuel_consumption_l_per_km_used == null
+          ? ''
+          : String(selectedEntry.fuel_consumption_l_per_km_used)
+      );
+    }
+  }
+
+  const editIsFuel = selectedEntry?.category?.trim().toLowerCase() === 'carburant';
+
+  const editFuelKmDay = useMemo(() => {
+    if (!detailOpen || detailMode !== 'edit' || !editIsFuel) return null;
+    return computeFuelDerived({
+      kmStartText: editFuelKmStartText,
+      kmEndText: editFuelKmEndText,
+      priceText: editFuelPriceText,
+      consumptionText: editFuelConsumptionText,
+    }).kmDay;
+  }, [detailOpen, detailMode, editIsFuel, editFuelKmStartText, editFuelKmEndText]);
+
+  const editFuelDueAriary = useMemo(() => {
+    if (!detailOpen || detailMode !== 'edit' || !editIsFuel) return null;
+    return computeFuelDerived({
+      kmStartText: editFuelKmStartText,
+      kmEndText: editFuelKmEndText,
+      priceText: editFuelPriceText,
+      consumptionText: editFuelConsumptionText,
+    }).dueAriary;
+  }, [detailOpen, detailMode, editIsFuel, editFuelKmStartText, editFuelKmEndText, editFuelPriceText, editFuelConsumptionText]);
+
+  const editFuelInlineError = useMemo(() => {
+    if (!detailOpen || detailMode !== 'edit' || !editIsFuel) return null;
+    return computeFuelDerived({
+      kmStartText: editFuelKmStartText,
+      kmEndText: editFuelKmEndText,
+      priceText: editFuelPriceText,
+      consumptionText: editFuelConsumptionText,
+    }).error;
+  }, [detailOpen, detailMode, editIsFuel, editFuelKmStartText, editFuelKmEndText, editFuelPriceText, editFuelConsumptionText]);
+
+  async function submitEditEntry(e: FormEvent) {
+    e.preventDefault();
+    if (!data || !selectedEntry || !entryEditForm) return;
+    setDetailError(null);
+
+    const patch: FleetEntryPatchInput = {
+      entry_type: entryEditForm.entry_type,
+      entry_date: entryEditForm.entry_date,
+      category: (entryEditForm.category ?? selectedEntry.category).trim(),
+      label: entryEditForm.label ?? selectedEntry.label,
+      notes: entryEditForm.notes ?? null,
+    };
+
+    if (editIsFuel) {
+      const startDigits = digitsOnly(editFuelKmStartText);
+      const endDigits = digitsOnly(editFuelKmEndText);
+      const start = startDigits ? Number.parseInt(startDigits, 10) : null;
+      const end = endDigits ? Number.parseInt(endDigits, 10) : null;
+      if (start == null || start < 0) return setDetailError('Km départ invalide (entier >= 0).');
+      if (end == null || end < 0) return setDetailError('Km retour invalide (entier >= 0).');
+      if (end < start) return setDetailError('Km retour doit être ≥ km départ.');
+      const priceDigits = digitsOnly(editFuelPriceText);
+      const price = priceDigits ? Number.parseInt(priceDigits, 10) : null;
+      if (price == null || price <= 0) return setDetailError('Prix litre invalide (entier > 0).');
+      const conso = parseFloatOrNull(editFuelConsumptionText);
+      if (conso == null || conso <= 0) return setDetailError('Consommation invalide (nombre > 0).');
+      if (editFuelDueAriary == null || editFuelKmDay == null) {
+        return setDetailError('Calcul carburant incomplet.');
+      }
+      patch.fuel_km_start = start;
+      patch.fuel_km_end = end;
+      patch.fuel_price_per_litre_ariary_used = price;
+      patch.fuel_consumption_l_per_km_used = conso;
+    } else {
+      const amount = Number.parseInt(digitsOnly(editAmountText), 10) || 0;
+      if (!Number.isInteger(amount) || amount <= 0) return setDetailError('Montant invalide (entier > 0).');
+      const odoDigits = digitsOnly(editOdometerText);
+      const odo = odoDigits ? Number.parseInt(odoDigits, 10) : null;
+      if (odo != null && (!Number.isInteger(odo) || odo < 0)) return setDetailError('Kilométrage invalide (entier >= 0).');
+      patch.amount_ariary = amount;
+      patch.odometer_km = odo;
+    }
+
+    setDetailSubmitting(true);
+    const res = await patchFleetVehicleEntry(data.vehicle.id, selectedEntry.id, patch);
+    setDetailSubmitting(false);
+    if (res.error) {
+      setDetailError(res.error.message);
+      return;
+    }
+    setDetailOpen(false);
+    setRefreshSeq((s) => s + 1);
+  }
+
+  async function confirmAndSoftDeleteEntry() {
+    if (!data || !selectedEntry) return;
+    if (detailSubmitting) return;
+    const ok = window.confirm('Supprimer cette écriture ? (suppression logique)');
+    if (!ok) return;
+    setDetailSubmitting(true);
+    const res = await softDeleteFleetVehicleEntry(data.vehicle.id, selectedEntry.id);
+    setDetailSubmitting(false);
+    if (res.error) {
+      setDetailError(res.error.message);
+      return;
+    }
+    setDetailOpen(false);
+    setRefreshSeq((s) => s + 1);
+  }
 
   return (
     <RequireAuth>
@@ -547,7 +915,16 @@ export default function FleetVehicleDetailPage() {
                   </thead>
                   <tbody>
                     {recentEntries.map((e) => (
-                      <tr key={e.id} className="hover:bg-zinc-50">
+                      <tr
+                        key={e.id}
+                        className="cursor-pointer hover:bg-zinc-50"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => openEntryDetail(e)}
+                        onKeyDown={(ev) => {
+                          if (ev.key === 'Enter' || ev.key === ' ') openEntryDetail(e);
+                        }}
+                      >
                         <td className="border-b border-zinc-100 px-2 py-2">{e.entry_date}</td>
                         <td className="border-b border-zinc-100 px-2 py-2">
                           <span
@@ -564,9 +941,14 @@ export default function FleetVehicleDetailPage() {
                           {formatAriary(e.amount_ariary)}
                         </td>
                         <td className="border-b border-zinc-100 px-2 py-2 tabular-nums text-zinc-700">
-                          {typeof e.odometer_km === 'number' && Number.isFinite(e.odometer_km)
-                            ? new Intl.NumberFormat('fr-FR').format(e.odometer_km)
-                            : '—'}
+                          {String(e.category ?? '').trim().toLowerCase() === 'carburant' &&
+                          e.entry_type === 'income' &&
+                          typeof e.fuel_km_end === 'number' &&
+                          Number.isFinite(e.fuel_km_end)
+                            ? new Intl.NumberFormat('fr-FR').format(e.fuel_km_end)
+                            : typeof e.odometer_km === 'number' && Number.isFinite(e.odometer_km)
+                              ? new Intl.NumberFormat('fr-FR').format(e.odometer_km)
+                              : '—'}
                         </td>
                         <td className="border-b border-zinc-100 px-2 py-2">{e.category}</td>
                         <td className="border-b border-zinc-100 px-2 py-2">{e.label}</td>
@@ -787,29 +1169,85 @@ export default function FleetVehicleDetailPage() {
                         <option value="expense">Expense</option>
                       </select>
                     </label>
-                    <label className="flex flex-col gap-1 text-sm">
-                      <span className="text-zinc-700">Montant (Ar)</span>
-                      <input
-                        className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
-                        inputMode="numeric"
-                        value={entryAmountText}
-                        onChange={(e) => setEntryAmountText(e.target.value)}
-                        onBlur={() => setEntryAmountText((v) => formatDigitsFr(v))}
-                        disabled={entrySubmitting}
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1 text-sm">
-                      <span className="text-zinc-700">Kilométrage (km)</span>
-                      <input
-                        className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
-                        inputMode="numeric"
-                        placeholder="optionnel"
-                        value={entryOdometerText}
-                        onChange={(e) => setEntryOdometerText(e.target.value)}
-                        onBlur={() => setEntryOdometerText((v) => formatDigitsFr(v))}
-                        disabled={entrySubmitting}
-                      />
-                    </label>
+
+                    {/* Fuel + income: results-first UX layout */}
+                    {isFuelEntry && entryForm.entry_type === 'income' ? (
+                      <div className="sm:col-span-2 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-xs font-medium text-emerald-900">Résultat (carburant)</div>
+                            <div className="mt-1 text-xs text-emerald-800">
+                              Km du jour et montant dû sont calculés automatiquement.
+                            </div>
+                          </div>
+                          <span className="inline-flex items-center rounded-full border border-emerald-200 bg-white px-2 py-0.5 text-xs font-medium text-emerald-900">
+                            income
+                          </span>
+                        </div>
+                        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <div className="rounded-lg border border-emerald-200 bg-white p-3">
+                            <div className="text-xs text-emerald-900">Carburant dû (Ar)</div>
+                            <div className="mt-1 text-2xl font-semibold tabular-nums text-emerald-950">
+                              {fuelDueAriary == null ? '—' : `${formatAriary(fuelDueAriary)} Ar`}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border border-emerald-200 bg-white p-3">
+                            <div className="text-xs text-emerald-900">Km du jour</div>
+                            <div className="mt-1 text-2xl font-semibold tabular-nums text-emerald-950">
+                              {fuelKmDay == null ? '—' : new Intl.NumberFormat('fr-FR').format(fuelKmDay)}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {/* Standard (non-fuel): keep legacy fields */}
+                    {!isFuelEntry ? (
+                      <>
+                        <label className="flex flex-col gap-1 text-sm">
+                          <span className="text-zinc-700">Montant (Ar)</span>
+                          <input
+                            className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                            inputMode="numeric"
+                            value={entryAmountText}
+                            onChange={(e) => setEntryAmountText(e.target.value)}
+                            onBlur={() => setEntryAmountText((v) => formatDigitsFr(v))}
+                            disabled={entrySubmitting}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1 text-sm">
+                          <span className="text-zinc-700">Kilométrage (km)</span>
+                          <input
+                            className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                            inputMode="numeric"
+                            placeholder="optionnel"
+                            value={entryOdometerText}
+                            onChange={(e) => setEntryOdometerText(e.target.value)}
+                            onBlur={() => setEntryOdometerText((v) => formatDigitsFr(v))}
+                            disabled={entrySubmitting}
+                          />
+                        </label>
+                      </>
+                    ) : null}
+
+                    {/* Fuel but not income: keep a minimal, non-ambiguous summary (no manual amount). */}
+                    {isFuelEntry && entryForm.entry_type !== 'income' ? (
+                      <>
+                        <div className="rounded-lg border border-zinc-200 px-3 py-2 text-sm">
+                          <div className="text-xs text-zinc-600">Carburant dû (Ar)</div>
+                          <div className="mt-1 font-semibold tabular-nums">
+                            {fuelDueAriary == null ? '—' : `${formatAriary(fuelDueAriary)} Ar`}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-zinc-200 px-3 py-2 text-sm">
+                          <div className="text-xs text-zinc-600">Km du jour</div>
+                          <div className="mt-1 font-semibold tabular-nums">
+                            {fuelKmDay == null ? '—' : new Intl.NumberFormat('fr-FR').format(fuelKmDay)}
+                          </div>
+                        </div>
+                      </>
+                    ) : null}
+
                     <label className="flex flex-col gap-1 text-sm">
                       <span className="text-zinc-700">Date</span>
                       <input
@@ -825,7 +1263,33 @@ export default function FleetVehicleDetailPage() {
                       <select
                         className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                         value={entryForm.category}
-                        onChange={(e) => setEntryForm((p) => ({ ...p, category: e.target.value }))}
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          setEntryForm((p) => ({
+                            ...p,
+                            category: next,
+                            // For fuel: default to income, but let the user override afterwards.
+                            entry_type: next === 'carburant' ? 'income' : p.entry_type,
+                            label: next === 'carburant' ? 'Carburant' : p.label,
+                            odometer_km: next === 'carburant' ? null : p.odometer_km,
+                          }));
+                          if (next === 'carburant') {
+                            if (!fuelPriceText.trim()) setFuelPriceText('10 000');
+                            if (!fuelConsumptionText.trim()) setFuelConsumptionText('0.05');
+                            // Prefill km départ from last known km retour (fuel) if empty.
+                            if (!fuelKmStartText.trim()) {
+                              const lastKm =
+                                data?.recent_entries?.find(
+                                  (e) => typeof e.fuel_km_end === 'number' && Number.isFinite(e.fuel_km_end)
+                                )?.fuel_km_end ??
+                                data?.recent_entries?.find(
+                                  (e) => typeof e.odometer_km === 'number' && Number.isFinite(e.odometer_km)
+                                )?.odometer_km ??
+                                null;
+                              if (lastKm != null) setFuelKmStartText(formatIntFr(lastKm));
+                            }
+                          }
+                        }}
                         disabled={entrySubmitting}
                       >
                         <option value="achat_vehicule">achat_vehicule</option>
@@ -837,17 +1301,71 @@ export default function FleetVehicleDetailPage() {
                         <option value="autre">autre</option>
                       </select>
                     </label>
+                    {!isFuelEntry ? (
+                      <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                        <span className="text-zinc-700">Libellé</span>
+                        <input
+                          className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                          value={entryForm.label}
+                          onChange={(e) => setEntryForm((p) => ({ ...p, label: e.target.value }))}
+                          disabled={entrySubmitting}
+                        />
+                      </label>
+                    ) : null}
+
+                    {isFuelEntry ? (
+                      <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-white p-4">
+                        <div className="text-xs font-medium text-zinc-900">Saisie métier</div>
+                        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Km départ</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="numeric"
+                              value={fuelKmStartText}
+                              onChange={(e) => setFuelKmStartText(e.target.value)}
+                              onBlur={() => setFuelKmStartText((v) => formatDigitsFr(v))}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Km retour</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="numeric"
+                              value={fuelKmEndText}
+                              onChange={(e) => setFuelKmEndText(e.target.value)}
+                              onBlur={() => setFuelKmEndText((v) => formatDigitsFr(v))}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Prix litre (Ar)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="numeric"
+                              value={fuelPriceText}
+                              onChange={(e) => setFuelPriceText(e.target.value)}
+                              onBlur={() => setFuelPriceText((v) => formatDigitsFr(v))}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Consommation (L/km)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="decimal"
+                              placeholder="ex: 0.05"
+                              value={fuelConsumptionText}
+                              onChange={(e) => setFuelConsumptionText(e.target.value)}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                        </div>
+                      </div>
+                    ) : null}
                     <label className="flex flex-col gap-1 text-sm sm:col-span-2">
-                      <span className="text-zinc-700">Libellé</span>
-                      <input
-                        className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
-                        value={entryForm.label}
-                        onChange={(e) => setEntryForm((p) => ({ ...p, label: e.target.value }))}
-                        disabled={entrySubmitting}
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1 text-sm sm:col-span-2">
-                      <span className="text-zinc-700">Notes</span>
+                      <span className="text-zinc-700">{isFuelEntry ? 'Observation' : 'Notes'}</span>
                       <input
                         className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                         value={String(entryForm.notes ?? '')}
@@ -858,6 +1376,11 @@ export default function FleetVehicleDetailPage() {
                     {entryError ? (
                       <div className="sm:col-span-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
                         {entryError}
+                      </div>
+                    ) : null}
+                    {isFuelEntry && fuelInlineError ? (
+                      <div className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                        {fuelInlineError}
                       </div>
                     ) : null}
                     <div className="sm:col-span-2 mt-1 flex justify-end gap-2">
@@ -872,12 +1395,327 @@ export default function FleetVehicleDetailPage() {
                       <button
                         type="submit"
                         className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
-                        disabled={entrySubmitting}
+                        disabled={entrySubmitting || !fuelCanSubmit}
                       >
                         {entrySubmitting ? 'Ajout…' : 'Ajouter'}
                       </button>
                     </div>
                   </form>
+                </div>
+              </div>
+            ) : null}
+
+            {detailOpen && selectedEntry ? (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                role="presentation"
+                onClick={() => !detailSubmitting && setDetailOpen(false)}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="entry-detail-title"
+                  className="w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h2 id="entry-detail-title" className="text-lg font-semibold text-zinc-900">
+                        Écriture
+                      </h2>
+                      <div className="mt-1 text-xs text-zinc-500">{selectedEntry.id}</div>
+                    </div>
+                    <div className="flex gap-2">
+                      {detailMode === 'read' ? (
+                        <>
+                          <button
+                            type="button"
+                            className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                            disabled={detailSubmitting}
+                            onClick={beginEditEntry}
+                          >
+                            Modifier
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900 hover:bg-red-100 disabled:opacity-50"
+                            disabled={detailSubmitting}
+                            onClick={() => void confirmAndSoftDeleteEntry()}
+                          >
+                            Supprimer
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {detailMode === 'read' ? (
+                    <div className="mt-4 grid grid-cols-1 gap-3 text-sm">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="rounded-lg border border-zinc-200 p-3">
+                          <div className="text-xs text-zinc-600">Type</div>
+                          <div className="mt-1 font-medium">{selectedEntry.entry_type}</div>
+                        </div>
+                        <div className="rounded-lg border border-zinc-200 p-3">
+                          <div className="text-xs text-zinc-600">Date</div>
+                          <div className="mt-1 font-medium">{selectedEntry.entry_date}</div>
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-zinc-200 p-3">
+                        <div className="text-xs text-zinc-600">Catégorie</div>
+                        <div className="mt-1 font-medium">{selectedEntry.category}</div>
+                      </div>
+                      <div className="rounded-lg border border-zinc-200 p-3">
+                        <div className="text-xs text-zinc-600">Montant (Ar)</div>
+                        <div className="mt-1 font-semibold tabular-nums">{formatAriary(selectedEntry.amount_ariary)} Ar</div>
+                      </div>
+                      {selectedEntry.category?.trim().toLowerCase() === 'carburant' ? (
+                        <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                          <div className="text-xs font-medium text-emerald-900">Carburant (snapshot)</div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-sm">
+                            <div>
+                              <div className="text-xs text-emerald-800">Km départ</div>
+                              <div className="font-medium tabular-nums">{selectedEntry.fuel_km_start ?? '—'}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-emerald-800">Km retour</div>
+                              <div className="font-medium tabular-nums">{selectedEntry.fuel_km_end ?? '—'}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-emerald-800">Km du jour</div>
+                              <div className="font-medium tabular-nums">{selectedEntry.fuel_km_travelled ?? '—'}</div>
+                            </div>
+                            <div>
+                              <div className="text-xs text-emerald-800">Carburant dû</div>
+                              <div className="font-semibold tabular-nums">
+                                {selectedEntry.fuel_due_ariary == null ? '—' : `${formatAriary(selectedEntry.fuel_due_ariary)} Ar`}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-emerald-800">
+                            <div>Prix litre: {selectedEntry.fuel_price_per_litre_ariary_used ?? '—'} Ar</div>
+                            <div>Conso: {selectedEntry.fuel_consumption_l_per_km_used ?? '—'} L/km</div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="rounded-lg border border-zinc-200 p-3">
+                            <div className="text-xs text-zinc-600">Km</div>
+                            <div className="mt-1 font-medium tabular-nums">
+                              {selectedEntry.odometer_km == null ? '—' : new Intl.NumberFormat('fr-FR').format(selectedEntry.odometer_km)}
+                            </div>
+                          </div>
+                          <div className="rounded-lg border border-zinc-200 p-3">
+                            <div className="text-xs text-zinc-600">Libellé</div>
+                            <div className="mt-1 font-medium">{selectedEntry.label}</div>
+                          </div>
+                        </div>
+                      )}
+                      <div className="rounded-lg border border-zinc-200 p-3">
+                        <div className="text-xs text-zinc-600">Notes</div>
+                        <div className="mt-1 text-zinc-800">{selectedEntry.notes?.trim() ? selectedEntry.notes : '—'}</div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {detailMode === 'edit' && entryEditForm ? (
+                    <form className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2" onSubmit={submitEditEntry}>
+                      <label className="flex flex-col gap-1 text-sm">
+                        <span className="text-zinc-700">Type</span>
+                        <select
+                          className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                          value={entryEditForm.entry_type ?? selectedEntry.entry_type}
+                          onChange={(e) =>
+                            setEntryEditForm((p) =>
+                              p ? { ...p, entry_type: e.target.value as 'income' | 'expense' } : p
+                            )
+                          }
+                          disabled={detailSubmitting}
+                        >
+                          <option value="income">Income</option>
+                          <option value="expense">Expense</option>
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1 text-sm">
+                        <span className="text-zinc-700">Date</span>
+                        <input
+                          className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                          type="date"
+                          value={entryEditForm.entry_date ?? selectedEntry.entry_date}
+                          onChange={(e) =>
+                            setEntryEditForm((p) => (p ? { ...p, entry_date: e.target.value } : p))
+                          }
+                          disabled={detailSubmitting}
+                        />
+                      </label>
+
+                      {editIsFuel ? (
+                        <div className="sm:col-span-2 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                          <div className="text-xs font-medium text-emerald-900">Résultat (carburant)</div>
+                          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <div className="rounded-lg border border-emerald-200 bg-white p-3">
+                              <div className="text-xs text-emerald-900">Carburant dû (Ar)</div>
+                              <div className="mt-1 text-2xl font-semibold tabular-nums text-emerald-950">
+                                {editFuelDueAriary == null ? '—' : `${formatAriary(editFuelDueAriary)} Ar`}
+                              </div>
+                            </div>
+                            <div className="rounded-lg border border-emerald-200 bg-white p-3">
+                              <div className="text-xs text-emerald-900">Km du jour</div>
+                              <div className="mt-1 text-2xl font-semibold tabular-nums text-emerald-950">
+                                {editFuelKmDay == null ? '—' : new Intl.NumberFormat('fr-FR').format(editFuelKmDay)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {editIsFuel ? (
+                        <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-white p-4">
+                          <div className="text-xs font-medium text-zinc-900">Saisie métier</div>
+                          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <label className="flex flex-col gap-1 text-sm">
+                              <span className="text-zinc-700">Km départ</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="numeric"
+                                value={editFuelKmStartText}
+                                onChange={(e) => setEditFuelKmStartText(e.target.value)}
+                                onBlur={() => setEditFuelKmStartText((v) => formatDigitsFr(v))}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-sm">
+                              <span className="text-zinc-700">Km retour</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="numeric"
+                                value={editFuelKmEndText}
+                                onChange={(e) => setEditFuelKmEndText(e.target.value)}
+                                onBlur={() => setEditFuelKmEndText((v) => formatDigitsFr(v))}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-sm">
+                              <span className="text-zinc-700">Prix litre (Ar)</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="numeric"
+                                value={editFuelPriceText}
+                                onChange={(e) => setEditFuelPriceText(e.target.value)}
+                                onBlur={() => setEditFuelPriceText((v) => formatDigitsFr(v))}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-sm">
+                              <span className="text-zinc-700">Consommation (L/km)</span>
+                              <input
+                                className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                                inputMode="decimal"
+                                value={editFuelConsumptionText}
+                                onChange={(e) => setEditFuelConsumptionText(e.target.value)}
+                                disabled={detailSubmitting}
+                              />
+                            </label>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Montant (Ar)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="numeric"
+                              value={editAmountText}
+                              onChange={(e) => setEditAmountText(e.target.value)}
+                              onBlur={() => setEditAmountText((v) => formatDigitsFr(v))}
+                              disabled={detailSubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Kilométrage (km)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="numeric"
+                              placeholder="optionnel"
+                              value={editOdometerText}
+                              onChange={(e) => setEditOdometerText(e.target.value)}
+                              onBlur={() => setEditOdometerText((v) => formatDigitsFr(v))}
+                              disabled={detailSubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                            <span className="text-zinc-700">Catégorie</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                              value={String(entryEditForm.category ?? selectedEntry.category)}
+                              onChange={(e) =>
+                                setEntryEditForm((p) => (p ? { ...p, category: e.target.value } : p))
+                              }
+                              disabled={detailSubmitting}
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                            <span className="text-zinc-700">Libellé</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                              value={String(entryEditForm.label ?? selectedEntry.label)}
+                              onChange={(e) =>
+                                setEntryEditForm((p) => (p ? { ...p, label: e.target.value } : p))
+                              }
+                              disabled={detailSubmitting}
+                            />
+                          </label>
+                        </>
+                      )}
+
+                      <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                        <span className="text-zinc-700">{editIsFuel ? 'Observation' : 'Notes'}</span>
+                        <input
+                          className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                          value={String(entryEditForm.notes ?? '')}
+                          onChange={(e) =>
+                            setEntryEditForm((p) => (p ? { ...p, notes: e.target.value } : p))
+                          }
+                          disabled={detailSubmitting}
+                        />
+                      </label>
+
+                      {detailError ? (
+                        <div className="sm:col-span-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+                          {detailError}
+                        </div>
+                      ) : null}
+                      {editIsFuel && editFuelInlineError ? (
+                        <div className="sm:col-span-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                          {editFuelInlineError}
+                        </div>
+                      ) : null}
+                      <div className="sm:col-span-2 mt-1 flex justify-end gap-2">
+                        <button
+                          type="button"
+                          className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                          disabled={detailSubmitting}
+                          onClick={() => setDetailMode('read')}
+                        >
+                          Annuler
+                        </button>
+                        <button
+                          type="submit"
+                          className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+                          disabled={detailSubmitting || (editIsFuel && (editFuelDueAriary == null || editFuelInlineError != null))}
+                        >
+                          {detailSubmitting ? 'Enregistrement…' : 'Enregistrer'}
+                        </button>
+                      </div>
+                    </form>
+                  ) : null}
+
+                  {detailMode === 'read' && detailError ? (
+                    <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-900">
+                      {detailError}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ) : null}
