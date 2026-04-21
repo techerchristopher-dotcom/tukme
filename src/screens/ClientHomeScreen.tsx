@@ -74,10 +74,13 @@ import { supabase } from '../lib/supabase';
 import { getDriverContactForRide } from '../lib/getDriverContactForRide';
 import type { ClientRideStatus, RidePaymentMethod } from '../types/clientRide';
 import type { ClientDestination } from '../types/clientDestination';
+import type { Place } from '../types/place';
 import type { RidePricingEstimate } from '../types/ridePricing';
 import type { Profile } from '../types/profile';
 import { SearchingDriverView } from '../components/SearchingDriverView';
 import { ClientRideHistoryScreen } from './ClientRideHistoryScreen';
+import { getPlaceHistory } from '../services/placeHistory/getPlaceHistory';
+import { savePlaceToHistory } from '../services/placeHistory/savePlaceToHistory';
 
 const RIDE_RT_LOG = '[ride-realtime]';
 
@@ -872,6 +875,7 @@ function PlacesPickupSection(props: {
 function ClientItineraryModal(props: {
   visible: boolean;
   location: ClientLocationState;
+  userId: string;
   pickupQuery: string;
   onPickupQueryChange: (v: string) => void;
   pickupIsGps: boolean;
@@ -883,11 +887,13 @@ function ClientItineraryModal(props: {
   onValidate: () => void;
   onUseCurrentLocation: () => void;
   onPickPickup: (item: PlaceSuggestionItem) => Promise<void>;
+  onPickPickupHistory: (place: Place) => Promise<void>;
   onPickDestination: (item: PlaceSuggestionItem) => Promise<void>;
 }) {
   const {
     visible,
     location,
+    userId,
     pickupQuery,
     onPickupQueryChange,
     pickupIsGps,
@@ -899,6 +905,7 @@ function ClientItineraryModal(props: {
     onValidate,
     onUseCurrentLocation,
     onPickPickup,
+    onPickPickupHistory,
     onPickDestination,
   } = props;
 
@@ -912,6 +919,13 @@ function ClientItineraryModal(props: {
   const [destSuspended, setDestSuspended] = useState(false);
   const [picking, setPicking] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
+
+  // Pickup history dropdown (MVP)
+  const [isFocused, setIsFocused] = useState(false);
+  const [history, setHistory] = useState<Place[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  // MVP: ce flag ne décide pas "d'afficher" ; il sert seulement à forcer une fermeture ponctuelle.
+  const [showDropdown, setShowDropdown] = useState(false);
 
   const pickupRowScale = useRef(new Animated.Value(1)).current;
   const destRowScale = useRef(new Animated.Value(1)).current;
@@ -966,6 +980,38 @@ function ClientItineraryModal(props: {
   const current = active === 'pickup' ? pickupSuggest : destSuggest;
   const showSuggestions =
     !picking && current.suggestions.length > 0 && !(active === 'pickup' ? pickupSuspended : destSuspended);
+
+  async function loadPickupHistoryOnFocus() {
+    // MVP: on charge uniquement au focus (pas au mount).
+    if (active !== 'pickup') return;
+    if (pickupQuery.length >= 2) return;
+    if (isLoadingHistory) return;
+    setIsLoadingHistory(true);
+    try {
+      const items = await getPlaceHistory(userId);
+      setHistory(items);
+    } catch {
+      // MVP: pas d'affichage d'erreur dédié.
+      setHistory([]);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }
+
+  async function handleSelectHistory(place: Place) {
+    Keyboard.dismiss();
+    // 1) Remplir le champ texte avec label
+    onPickupQueryChange(place.label);
+    // 2) Mettre à jour le state Place complet (lat/lng inclus)
+    await onPickPickupHistory(place);
+    // 3) Fermer le dropdown
+    setIsFocused(false);
+    setShowDropdown(true);
+    // 4) Déclencher le flow existant (Uber-like)
+    setPickupSuspended(true);
+    setActive('destination');
+    setTimeout(() => destRef.current?.focus(), 120);
+  }
 
   function handleClearPickup() {
     onClearPickup();
@@ -1078,6 +1124,10 @@ function ClientItineraryModal(props: {
                     onPickupQueryChange(v);
                     setPickupSuspended(false);
                     setDetailsError(null);
+                    // Règle stricte: historique si query.length < 2, Google sinon.
+                    if (v.length >= 2) {
+                      setShowDropdown(true);
+                    }
                   }}
                   placeholder="Lieu de prise en charge"
                   placeholderTextColor="#9ca3af"
@@ -1085,7 +1135,20 @@ function ClientItineraryModal(props: {
                   autoCorrect={false}
                   autoCapitalize="none"
                   editable={!picking && !configError}
-                  onFocus={() => setActive('pickup')}
+                  onFocus={() => {
+                    setActive('pickup');
+                    setIsFocused(true);
+                    setShowDropdown(false);
+                    void loadPickupHistoryOnFocus();
+                  }}
+                  onBlur={() => {
+                    // UX: blur peut partir avant le onPress d'une ligne (surtout avec clavier ouvert).
+                    // MVP: on retarde suffisamment la fermeture pour que le tap soit capturé.
+                    setTimeout(() => {
+                      setIsFocused(false);
+                      setShowDropdown(true);
+                    }, 150);
+                  }}
                 onSubmitEditing={() => {
                   if (pickupQuery.trim()) {
                     setActive('destination');
@@ -1096,6 +1159,39 @@ function ClientItineraryModal(props: {
                 }}
                 />
               </View>
+
+              {active === 'pickup' &&
+              isFocused &&
+              pickupQuery.length < 2 &&
+              (isLoadingHistory || history.length > 0) &&
+              !showDropdown ? (
+                <View style={styles.itinHistoryBox}>
+                  {isLoadingHistory ? (
+                    <View style={styles.itinHistoryLoading}>
+                      <ActivityIndicator size="small" color={BRAND_PRIMARY} />
+                      <Text style={styles.itinHistoryLoadingText}>
+                        Chargement de l’historique…
+                      </Text>
+                    </View>
+                  ) : null}
+
+                  {!isLoadingHistory && history.length > 0
+                    ? history.map((p) => (
+                        <PressableScale
+                          key={p.place_id}
+                          style={styles.itinSuggestRow}
+                          pressedStyle={styles.itinSuggestRowPressed}
+                          onPress={() => void handleSelectHistory(p)}
+                        >
+                          <Text style={styles.itinSuggestPrimary}>{p.label}</Text>
+                          <Text style={styles.itinSuggestSecondary} numberOfLines={1}>
+                            {p.address}
+                          </Text>
+                        </PressableScale>
+                      ))
+                    : null}
+                </View>
+              ) : null}
             </Animated.View>
 
             <View style={styles.itinDivider} />
@@ -1209,7 +1305,11 @@ function ClientItineraryModal(props: {
             pressedStyle={styles.itinValidateBtnPressed}
             disabledStyle={styles.itinValidateBtnDisabled}
             disabled={!pickupQuery.trim() || !destinationQuery.trim()}
-            onPress={onValidate}
+            onPress={() => {
+              setIsFocused(false);
+              setShowDropdown(true);
+              onValidate();
+            }}
           >
             <Text style={styles.itinValidateBtnText}>Valider l’itinéraire</Text>
           </PressableScale>
@@ -2599,6 +2699,29 @@ function ClientHomeMiddleContent(props: {
     }
   }
 
+  async function handlePickPickupHistory(place: Place) {
+    setPickupMode('manual');
+    setPickupChoice('manual');
+    setPickupDetailsError(null);
+    setOrderError(null);
+    setCancelError(null);
+    orderRequestInFlightRef.current = false;
+
+    setStructuredPickup({
+      label: place.label.trim() || place.address.trim(),
+      latitude: place.lat,
+      longitude: place.lng,
+      placeId: place.place_id,
+      photoName: null,
+    });
+    setPickupSearchInput(place.label.trim() || place.address.trim());
+    setPickupSuggestionsSuspended(true);
+    setPickupSessionToken(newSessionToken());
+
+    // MVP: fire-and-forget, ne bloque pas l’UX.
+    void savePlaceToHistory(userId, place).catch(() => {});
+  }
+
   async function handleSignOut() {
     setSigningOut(true);
     try {
@@ -3565,6 +3688,7 @@ function ClientHomeMiddleContent(props: {
       <ClientItineraryModal
         visible={itineraryOpen}
         location={location}
+        userId={userId}
         pickupQuery={
           pickupChoice === 'manual'
             ? pickupSearchInput
@@ -3601,6 +3725,9 @@ function ClientHomeMiddleContent(props: {
         }}
         onPickPickup={async (item) => {
           await handlePickPickupSuggestion(item);
+        }}
+        onPickPickupHistory={async (place) => {
+          await handlePickPickupHistory(place);
         }}
         onPickDestination={async (item) => {
           await handlePickSuggestion(item);
@@ -4658,6 +4785,27 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: '#0f172a',
     paddingVertical: 0,
+  },
+  itinHistoryBox: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: '#fff',
+  },
+  itinHistoryLoading: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#e5e7eb',
+  },
+  itinHistoryLoadingText: {
+    color: '#64748b',
+    fontWeight: '600',
   },
   itinError: {
     marginTop: 12,
