@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check:env": "node scripts/check-expo-google-env.mjs"
+    "check:env": "node scripts/check-expo-google-env.mjs",
+    "deploy:admin-api": "supabase functions deploy admin-api --project-ref ppmmctdhnyolsehljosy --no-verify-jwt"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.1.1",

@@ -232,6 +232,7 @@ export type FleetEntryRow = {
   odometer_km?: number | null;
   entry_date: string; // YYYY-MM-DD
   category: string;
+  fuel_mode?: 'structured' | 'legacy' | null;
   label: string;
   notes: string | null;
   created_at: string;
@@ -254,6 +255,11 @@ export type FleetEntryRow = {
   // Fuel recharge fields (for 'carburant' + 'expense')
   fuel_recharge_litres_used?: number | null;
   fuel_recharge_km_credited_used?: number | null;
+
+  // Partial payment summary (computed server-side; only meaningful for 'carburant' + 'income')
+  total_paid_ariary?: number | null;
+  remaining_amount_ariary?: number | null;
+  payment_status?: 'unpaid' | 'partial' | 'paid' | null;
 };
 
 export type FleetFinancialSummary = {
@@ -295,6 +301,10 @@ export type FleetVehicleDetailResponse = {
     } | null;
     autonomy_status: 'confortable' | 'limite' | 'insuffisante';
   };
+  open_fuel_income_debt?: {
+    open_remaining_ariary: number;
+    open_entries_count: number;
+  } | null;
   vehicle: {
     id: string;
     plate_number: string;
@@ -326,6 +336,7 @@ export type FleetEntryCreateInput = {
   category: string;
   label: string;
   notes?: string | null;
+  fuel_mode?: 'structured' | 'legacy' | null;
 
   // Fuel snapshot fields (for calculated "carburant" entries)
   fuel_km_start?: number | null;
@@ -346,6 +357,7 @@ export type FleetEntryPatchInput = Partial<{
   odometer_km: number | null;
   entry_date: string; // YYYY-MM-DD
   category: string;
+  fuel_mode: 'structured' | 'legacy' | null;
   label: string;
   notes: string | null;
 
@@ -359,6 +371,15 @@ export type FleetEntryPatchInput = Partial<{
   fuel_recharge_litres_used: number;
   fuel_recharge_km_credited_used: number;
 }>;
+
+export type FleetEntryPaymentRow = {
+  id: string;
+  entry_id: string;
+  amount_ariary: number;
+  paid_at: string;
+  notes: string | null;
+  created_at: string;
+};
 
 export type FleetAssignmentCreateInput = {
   driver_id: string;

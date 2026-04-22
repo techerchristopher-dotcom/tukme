@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.1';
+import { incomeAmountForFleetKpi } from './fleet_financial_aggregates.ts';
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [k: string]: JsonValue };
 
@@ -258,11 +259,14 @@ async function computeFleetFuelSummaryFromEntriesTable(args: {
     const { data: rows, error } = await args.adminClient
       .from('fleet_vehicle_entries')
       .select(
-        'id, entry_type, entry_date, created_at, amount_ariary, category, fuel_km_travelled, fuel_km_end, fuel_recharge_litres_used, fuel_recharge_km_credited_used'
+        'id, entry_type, entry_date, created_at, amount_ariary, category, fuel_mode, fuel_km_travelled, fuel_km_end, fuel_recharge_litres_used, fuel_recharge_km_credited_used'
       )
       .eq('vehicle_id', args.vehicleId)
       .is('deleted_at', null)
       .eq('category', 'carburant')
+      // Legacy carburant entries are excluded from structured fuel computations.
+      // Keep NULL treated as structured for backwards compatibility.
+      .or('fuel_mode.is.null,fuel_mode.eq.structured')
       .order('created_at', { ascending: true })
       .range(scanOffset, scanOffset + PAGE_SIZE - 1);
     if (error) {
@@ -423,6 +427,13 @@ async function requireAdmin(req: Request): Promise<{
   const supabaseAnon = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
   if (!supabaseUrl || !supabaseAnon || !serviceKey) {
+    console.log('[admin-api] secrets presence', {
+      hasUrl: !!supabaseUrl,
+      hasAnon: !!supabaseAnon,
+      hasService: !!serviceKey,
+      serviceLen: serviceKey ? serviceKey.length : 0,
+      servicePrefix: serviceKey ? serviceKey.slice(0, 8) : '',
+    });
     throw Object.assign(new Error('Server misconfigured (missing Supabase env vars)'), {
       status: 500,
     });
@@ -433,26 +444,42 @@ async function requireAdmin(req: Request): Promise<{
     throw Object.assign(new Error('Admin allowlist is empty (ADMIN_EMAILS).'), { status: 500 });
   }
 
-  // Verify JWT robustly by passing the raw token (not "Bearer ...") to getUser(token).
-  // This avoids any accidental double-prefixing or header handling quirks.
-  const userClient = createClient(supabaseUrl, supabaseAnon);
-  const {
-    data: { user },
-    error: userErr,
-  } = await userClient.auth.getUser(rawToken);
-  if (userErr || !user) {
-    console.log('[admin-api] getUser error:', userErr?.message ?? 'unknown');
+  let userEmail: string | null = null;
+  let sub: string | null = null;
+  try {
+    const authClient = createClient(supabaseUrl, supabaseAnon, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { data, error: userErr } = await authClient.auth.getUser(rawToken);
+    if (userErr || !data.user) {
+      console.log('[admin-api] AUTH_GETUSER_FAILED', { message: userErr?.message ?? 'no user' });
+      throw Object.assign(new Error('AUTH_GETUSER_FAILED'), { status: 401 });
+    }
+
+    sub = String(data.user.id ?? '').trim() || null;
+    const email = String(data.user.email ?? '').trim().toLowerCase();
+    if (!email) {
+      console.log('[admin-api] AUTH_USER_EMAIL_MISSING', { sub });
+      throw Object.assign(new Error('AUTH_USER_EMAIL_MISSING'), { status: 401 });
+    }
+    userEmail = email;
+
+    if (!userEmail || !allow.has(userEmail)) {
+      console.log('[admin-api] AUTH_ALLOWLIST_DENIED', { userEmail, allowSize: allow.size });
+      throw Object.assign(new Error('AUTH_ALLOWLIST_DENIED'), { status: 403 });
+    }
+
+    const adminClient = createClient(supabaseUrl, serviceKey);
+    return { adminClient, userEmail };
+  } catch (e) {
+    // Preserve previous external behavior: a single auth error for UI, but with precise logs.
+    if (e && typeof e === 'object' && 'status' in e) throw e;
+    console.log('[admin-api] AUTH_GETUSER_FAILED (unhandled)', {
+      sub,
+      message: e instanceof Error ? e.message : String(e),
+    });
     throw Object.assign(new Error('AUTH_GETUSER_FAILED'), { status: 401 });
   }
-  console.log('[admin-api] getUser ok, user id present:', !!user.id);
-
-  const email = String(user.email ?? '').trim().toLowerCase();
-  if (!email || !allow.has(email)) {
-    throw Object.assign(new Error('Forbidden'), { status: 403 });
-  }
-
-  const adminClient = createClient(supabaseUrl, serviceKey);
-  return { adminClient, userEmail: email };
 }
 
 async function handlePlatformDailySummary(req: Request, url: URL) {
@@ -794,17 +821,17 @@ async function computeFleetVehicleEntriesAggregatesFromTable(args: {
   vehicleId: string;
   logPrefix: string;
 }): Promise<{ total_income_ariary: number; total_expense_ariary: number }> {
-  // Minimal + robust (no SQL RPC dependency):
-  // scan all entries for this vehicle and aggregate by entry_type.
-  // We page to avoid the max_rows limit truncating results.
+  // Scan all entries (paged). Carburant + income : voir fleet_financial_aggregates.ts.
   const PAGE_SIZE = 1000;
   let scanOffset = 0;
   let income = 0;
   let expense = 0;
+  type PaymentAggRow = { entry_id?: string | null; total_paid_ariary?: number | string | null };
+
   for (;;) {
     const { data: rows, error: scanErr } = await args.adminClient
       .from('fleet_vehicle_entries')
-      .select('entry_type, amount_ariary')
+      .select('id, entry_type, amount_ariary, category')
       .eq('vehicle_id', args.vehicleId)
       .is('deleted_at', null)
       .order('created_at', { ascending: true })
@@ -818,13 +845,57 @@ async function computeFleetVehicleEntriesAggregatesFromTable(args: {
       throw Object.assign(new Error('Internal error'), { status: 500 });
     }
     const batch = rows ?? [];
+    const fuelIncomeIds = (batch as any[])
+      .filter((r) => {
+        const et = String(r?.entry_type ?? '').trim().toLowerCase();
+        const cat = String(r?.category ?? '').trim().toLowerCase();
+        return et === 'income' && cat === 'carburant';
+      })
+      .map((r) => String(r?.id ?? ''))
+      .filter((x) => isUuid(x));
+
+    const paymentAggByEntryId = new Map<string, number>();
+    if (fuelIncomeIds.length) {
+      const { data: payAgg, error: payAggErr } = await args.adminClient.rpc('admin_fleet_entry_payments_aggregates', {
+        p_entry_ids: fuelIncomeIds,
+      });
+      if (payAggErr) {
+        console.error(`${args.logPrefix} entries scan payments aggregates error`, {
+          vehicleId: args.vehicleId,
+          message: payAggErr.message,
+          offset: scanOffset,
+        });
+        throw Object.assign(new Error('Internal error'), { status: 500 });
+      }
+      for (const r of (payAgg ?? []) as PaymentAggRow[]) {
+        const id = String(r?.entry_id ?? '');
+        if (!isUuid(id)) continue;
+        const v = typeof r?.total_paid_ariary === 'number' ? r.total_paid_ariary : Number(r?.total_paid_ariary ?? 0);
+        const n = Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0;
+        paymentAggByEntryId.set(id, n);
+      }
+    }
+
     for (const r of batch as any[]) {
-      const t = String(r?.entry_type ?? '');
+      const t = String(r?.entry_type ?? '').trim().toLowerCase();
       const a = typeof r?.amount_ariary === 'number' ? r.amount_ariary : Number(r?.amount_ariary ?? 0);
       if (!Number.isFinite(a)) continue;
-      if (t === 'income') income += a;
-      else if (t === 'expense') expense += a;
+      if (t === 'expense') {
+        expense += Math.trunc(a);
+      } else if (t === 'income') {
+        const id = String(r?.id ?? '');
+        const paid = isUuid(id) ? paymentAggByEntryId.get(id) ?? 0 : 0;
+        income += incomeAmountForFleetKpi(
+          {
+            entry_type: r?.entry_type,
+            category: r?.category,
+            amount_ariary: a,
+          },
+          paid
+        );
+      }
     }
+
     if (batch.length < PAGE_SIZE) break;
     scanOffset += PAGE_SIZE;
     if (scanOffset > 100_000) {
@@ -848,7 +919,6 @@ function computeFleetManualFinancialSummary(args: {
   total_income_ariary: number;
   total_expense_ariary: number;
 }): Record<string, unknown> {
-  // Enforce the explicit business separation income vs expense (no ambiguous summing).
   const income = Number.isFinite(args.total_income_ariary) ? args.total_income_ariary : 0;
   const expense = Number.isFinite(args.total_expense_ariary) ? args.total_expense_ariary : 0;
   const net = income - expense;
@@ -857,9 +927,7 @@ function computeFleetManualFinancialSummary(args: {
   const remaining = purchase == null ? null : Math.max(purchase - net, 0);
 
   const amortizedPercent =
-    purchase && purchase > 0
-      ? Math.min(Math.max(net / purchase, 0), 1) * 100
-      : null;
+    purchase && purchase > 0 ? Math.min(Math.max(net / purchase, 0), 1) * 100 : null;
 
   return {
     vehicle_id: args.vehicle_id,
@@ -868,7 +936,10 @@ function computeFleetManualFinancialSummary(args: {
     amortization_months: args.amortization_months,
     target_resale_price_ariary: args.target_resale_price_ariary,
     daily_rent_ariary: args.daily_rent_ariary,
+    // KPI recettes unique ; alias explicites pour clients / déploiements qui attendent encore les noms de la refonte courte.
     total_income_ariary: income,
+    total_income_received_ariary: income,
+    total_income_theoretical_ariary: income,
     total_expense_ariary: expense,
     net_ariary: net,
     remaining_to_amortize_ariary: remaining,
@@ -1102,7 +1173,7 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
     const { data: recentEntries, error: eErr } = await adminClient
       .from('fleet_vehicle_entries')
       .select(
-        'id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary, fuel_recharge_litres_used, fuel_recharge_km_credited_used'
+        'id, entry_type, amount_ariary, odometer_km, entry_date, category, fuel_mode, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary, fuel_recharge_litres_used, fuel_recharge_km_credited_used'
       )
       .eq('vehicle_id', vehicleId)
       .is('deleted_at', null)
@@ -1120,6 +1191,88 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
       vehicleId,
       count: (recentEntries ?? []).length,
     });
+
+    stage = 'compute payments aggregates (recent_entries)';
+    type PaymentAggRow = { entry_id?: string | null; total_paid_ariary?: number | string | null };
+    const entryIds = (recentEntries ?? [])
+      .map((r: any) => String(r?.id ?? ''))
+      .filter((x) => isUuid(x));
+    const paymentAggByEntryId = new Map<string, number>();
+    if (entryIds.length) {
+      const { data: payAgg, error: payAggErr } = await adminClient.rpc('admin_fleet_entry_payments_aggregates', {
+        p_entry_ids: entryIds,
+      });
+      if (payAggErr) {
+        console.error('[admin-api] fleet(manual) vehicle detail payments aggregates error', {
+          vehicleId,
+          message: payAggErr.message,
+        });
+      } else {
+        for (const r of (payAgg ?? []) as PaymentAggRow[]) {
+          const id = String(r?.entry_id ?? '');
+          if (!isUuid(id)) continue;
+          const v = typeof r?.total_paid_ariary === 'number' ? r.total_paid_ariary : Number(r?.total_paid_ariary ?? 0);
+          const n = Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0;
+          paymentAggByEntryId.set(id, n);
+        }
+      }
+    }
+
+    function enrichEntryWithPaymentSummary(row: any): any {
+      const id = String(row?.id ?? '');
+      const due = typeof row?.amount_ariary === 'number' ? row.amount_ariary : Number(row?.amount_ariary ?? 0);
+      const paid = paymentAggByEntryId.get(id) ?? 0;
+      const isFuelIncomeDebt =
+        String(row?.entry_type ?? '').trim().toLowerCase() === 'income' &&
+        String(row?.category ?? '').trim().toLowerCase() === 'carburant';
+
+      if (!isFuelIncomeDebt || !Number.isFinite(due) || due <= 0) {
+        return {
+          ...row,
+          total_paid_ariary: null,
+          remaining_amount_ariary: null,
+          payment_status: null,
+        };
+      }
+      const totalPaid = Math.max(0, Math.trunc(paid));
+      const remaining = Math.trunc(due) - totalPaid;
+      const status = totalPaid <= 0 ? 'unpaid' : totalPaid < Math.trunc(due) ? 'partial' : 'paid';
+      return {
+        ...row,
+        total_paid_ariary: totalPaid,
+        remaining_amount_ariary: remaining,
+        payment_status: status,
+      };
+    }
+
+    const enrichedRecentEntries = (recentEntries ?? []).map(enrichEntryWithPaymentSummary);
+
+    stage = 'compute vehicle open fuel debt';
+    let openFuelIncomeDebt: { open_remaining_ariary: number; open_entries_count: number } | null = null;
+    try {
+      const { data: openRows, error: openErr } = await adminClient.rpc('admin_fleet_vehicle_open_fuel_income_debt', {
+        p_vehicle_id: vehicleId,
+      });
+      if (openErr) {
+        console.error('[admin-api] fleet(manual) vehicle detail open fuel debt rpc error', {
+          vehicleId,
+          message: openErr.message,
+        });
+      } else {
+        const first = Array.isArray(openRows) ? (openRows[0] as any) : (openRows as any);
+        const rem = typeof first?.open_remaining_ariary === 'number' ? first.open_remaining_ariary : Number(first?.open_remaining_ariary ?? 0);
+        const cnt = typeof first?.open_entries_count === 'number' ? first.open_entries_count : Number(first?.open_entries_count ?? 0);
+        openFuelIncomeDebt = {
+          open_remaining_ariary: Number.isFinite(rem) ? Math.max(0, Math.trunc(rem)) : 0,
+          open_entries_count: Number.isFinite(cnt) ? Math.max(0, Math.trunc(cnt)) : 0,
+        };
+      }
+    } catch (e) {
+      console.error('[admin-api] fleet(manual) vehicle detail open fuel debt unhandled', {
+        vehicleId,
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
 
     stage = 'compute fuel_summary (from entries)';
     let fuelSummary: FleetFuelSummary | null = null;
@@ -1228,9 +1381,10 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
         vehicle,
         active_assignment: active,
         assignment_history: assignmentHistory,
-        recent_entries: recentEntries ?? [],
+        recent_entries: enrichedRecentEntries,
         fuel_summary: fuelSummary,
         financial_summary: summary,
+        open_fuel_income_debt: openFuelIncomeDebt,
       },
       error: null,
     });
@@ -1578,7 +1732,7 @@ async function handleFleetVehicleEntriesList(req: Request, url: URL, vehicleIdRa
   const q = adminClient
     .from('fleet_vehicle_entries')
     .select(
-      'id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary, fuel_recharge_litres_used, fuel_recharge_km_credited_used',
+      'id, entry_type, amount_ariary, odometer_km, entry_date, category, fuel_mode, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary, fuel_recharge_litres_used, fuel_recharge_km_credited_used',
       { count: 'exact' }
     )
     .eq('vehicle_id', vehicleId)
@@ -1597,7 +1751,45 @@ async function handleFleetVehicleEntriesList(req: Request, url: URL, vehicleIdRa
     console.error('[admin-api] fleet(manual) entries list', error.message);
     return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
   }
-  return jsonResponse(200, { data: { items: data ?? [], count: count ?? 0, limit, offset }, error: null });
+
+  // Enrich only fuel income entries with payment summary, without N+1.
+  const items = data ?? [];
+  const entryIds = items.map((r: any) => String(r?.id ?? '')).filter((x) => isUuid(x));
+  const paymentAggByEntryId = new Map<string, number>();
+  if (entryIds.length) {
+    const { data: payAgg, error: payAggErr } = await adminClient.rpc('admin_fleet_entry_payments_aggregates', {
+      p_entry_ids: entryIds,
+    });
+    if (payAggErr) {
+      console.error('[admin-api] fleet(manual) entries list payments aggregates error', payAggErr.message);
+    } else {
+      for (const r of (payAgg ?? []) as any[]) {
+        const id = String(r?.entry_id ?? '');
+        if (!isUuid(id)) continue;
+        const v = typeof r?.total_paid_ariary === 'number' ? r.total_paid_ariary : Number(r?.total_paid_ariary ?? 0);
+        const n = Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0;
+        paymentAggByEntryId.set(id, n);
+      }
+    }
+  }
+
+  const enriched = items.map((row: any) => {
+    const id = String(row?.id ?? '');
+    const due = typeof row?.amount_ariary === 'number' ? row.amount_ariary : Number(row?.amount_ariary ?? 0);
+    const paid = paymentAggByEntryId.get(id) ?? 0;
+    const isFuelIncomeDebt =
+      String(row?.entry_type ?? '').trim().toLowerCase() === 'income' &&
+      String(row?.category ?? '').trim().toLowerCase() === 'carburant';
+    if (!isFuelIncomeDebt || !Number.isFinite(due) || due <= 0) {
+      return { ...row, total_paid_ariary: null, remaining_amount_ariary: null, payment_status: null };
+    }
+    const totalPaid = Math.max(0, Math.trunc(paid));
+    const remaining = Math.trunc(due) - totalPaid;
+    const status = totalPaid <= 0 ? 'unpaid' : totalPaid < Math.trunc(due) ? 'partial' : 'paid';
+    return { ...row, total_paid_ariary: totalPaid, remaining_amount_ariary: remaining, payment_status: status };
+  });
+
+  return jsonResponse(200, { data: { items: enriched, count: count ?? 0, limit, offset }, error: null });
 }
 
 async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: string): Promise<Response> {
@@ -1611,16 +1803,17 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
 
   const category = requireBodyString(body, 'category');
   const categoryNorm = category.trim().toLowerCase();
+  const isFuel = categoryNorm === 'carburant';
+
+  const fuelModeRaw = asNonEmptyString((body as any).fuel_mode)?.toLowerCase() ?? null;
+  if (fuelModeRaw && fuelModeRaw !== 'structured' && fuelModeRaw !== 'legacy') {
+    throw Object.assign(new Error("fuel_mode must be one of: structured, legacy"), { status: 400 });
+  }
 
   const entryTypeRaw = asNonEmptyString(body.entry_type)?.toLowerCase() ?? null;
   if (entryTypeRaw !== 'income' && entryTypeRaw !== 'expense') {
     throw Object.assign(new Error("entry_type must be one of: income, expense"), { status: 400 });
   }
-
-  // Fuel entries:
-  // - carburant + income  => daily consumption (computed from km + conso + price)
-  // - carburant + expense => recharge (stock credit; stores litres/km credited snapshots)
-  const isFuel = categoryNorm === 'carburant';
 
   let entryType: 'income' | 'expense' = entryTypeRaw as 'income' | 'expense';
   let amount: number | null = null;
@@ -1641,7 +1834,21 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
   let fuelRechargeLitresUsed: number | null = null;
   let fuelRechargeKmCreditedUsed: number | null = null;
 
+  // Decide fuel_mode (minimal & safe):
+  // - explicit fuel_mode wins
+  // - otherwise infer: if structured fields are present/valid -> structured, else legacy
+  let fuelMode: 'structured' | 'legacy' | null = isFuel
+    ? ((fuelModeRaw as 'structured' | 'legacy' | null) ?? null)
+    : null;
+
   if (isFuel && entryType === 'income') {
+    if (!fuelMode) fuelMode = 'structured';
+    if (fuelMode === 'legacy') {
+      amount = asInt(body.amount_ariary);
+      if (amount == null || amount <= 0) {
+        throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+      }
+    } else {
     fuelKmStart = asInt(fuelKmStartRaw);
     if (fuelKmStart == null || fuelKmStart < 0) {
       throw Object.assign(new Error('fuel_km_start must be an integer >= 0'), { status: 400 });
@@ -1680,7 +1887,15 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
       throw Object.assign(new Error('fuel_due_ariary must be > 0'), { status: 400 });
     }
     amount = fuelDue;
+    }
   } else if (isFuel && entryType === 'expense') {
+    if (!fuelMode) fuelMode = 'structured';
+    if (fuelMode === 'legacy') {
+      amount = asInt(body.amount_ariary);
+      if (amount == null || amount <= 0) {
+        throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+      }
+    } else {
     // Recharge: litres/km credited are provided by the client and stored as-is (snapshots).
     fuelRechargeLitresUsed = asNumber(fuelRechargeLitresRaw);
     if (fuelRechargeLitresUsed == null || fuelRechargeLitresUsed <= 0) {
@@ -1713,6 +1928,7 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
     if (amount == null || amount <= 0) {
       throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
     }
+    }
   } else {
     amount = asInt(body.amount_ariary);
     if (amount == null || amount <= 0) {
@@ -1727,7 +1943,7 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
   if (odometerKm != null && odometerKm < 0) {
     throw Object.assign(new Error('odometer_km must be >= 0'), { status: 400 });
   }
-  if (isFuel && entryType === 'expense') {
+  if (isFuel && entryType === 'expense' && fuelMode !== 'legacy') {
     if (odometerKm == null) {
       throw Object.assign(new Error('odometer_km is required for fuel recharge'), { status: 400 });
     }
@@ -1749,6 +1965,7 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
       amount_ariary: amount,
       odometer_km: odometerKm,
       category,
+      fuel_mode: isFuel ? fuelMode : null,
       label,
       entry_date: entryDate,
       notes: notes ?? null,
@@ -1783,7 +2000,7 @@ async function requireFleetVehicleEntryExists(args: {
   const { data, error } = await args.adminClient
     .from('fleet_vehicle_entries')
     .select(
-      'id, vehicle_id, entry_type, amount_ariary, odometer_km, entry_date, category, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary, fuel_recharge_litres_used, fuel_recharge_km_credited_used'
+      'id, vehicle_id, entry_type, amount_ariary, odometer_km, entry_date, category, fuel_mode, label, notes, created_at, updated_at, updated_by, deleted_at, deleted_by, delete_reason, fuel_km_start, fuel_km_end, fuel_km_travelled, fuel_price_per_litre_ariary_used, fuel_consumption_l_per_km_used, fuel_due_ariary, fuel_recharge_litres_used, fuel_recharge_km_credited_used'
     )
     .eq('vehicle_id', args.vehicleId)
     .eq('id', args.entryId)
@@ -1835,6 +2052,12 @@ async function handleFleetVehicleEntryPatch(
   const nextNotes =
     'notes' in body ? asNonEmptyString(body.notes) : (existing.notes as unknown as string | null | undefined) ?? null;
 
+  const requestedFuelModeRaw = 'fuel_mode' in body ? asNonEmptyString((body as any).fuel_mode)?.toLowerCase() : null;
+  if (requestedFuelModeRaw && requestedFuelModeRaw !== 'structured' && requestedFuelModeRaw !== 'legacy') {
+    throw Object.assign(new Error("fuel_mode must be one of: structured, legacy"), { status: 400 });
+  }
+  const existingFuelModeRaw = asNonEmptyString((existing as any).fuel_mode)?.toLowerCase() ?? null;
+
   const updateRow: Record<string, unknown> = {
     entry_type: nextEntryType,
     entry_date: nextEntryDate,
@@ -1851,7 +2074,98 @@ async function handleFleetVehicleEntryPatch(
     updateRow.category = nextCategory;
   }
 
+  // Decide next fuel_mode (minimal & safe):
+  // - explicit fuel_mode wins
+  // - otherwise keep existing fuel_mode
+  // - otherwise infer: if structured required fields are present/valid -> structured, else legacy
+  let nextFuelMode: 'structured' | 'legacy' | null = isFuel
+    ? ((requestedFuelModeRaw as any) ?? (existingFuelModeRaw as any) ?? null)
+    : null;
+
+  if (!isFuel) {
+    updateRow.fuel_mode = null;
+  }
+
   if (isFuel && nextEntryType === 'income') {
+    // Gold rule: if structured fields are missing, treat as legacy (declared truth).
+    const startForMode = asInt(
+      'fuel_km_start' in body ? (body as any).fuel_km_start : (existing as any).fuel_km_start
+    );
+    const endForMode = asInt(
+      'fuel_km_end' in body ? (body as any).fuel_km_end : (existing as any).fuel_km_end
+    );
+    const priceForMode = asInt(
+      'fuel_price_per_litre_ariary_used' in body
+        ? (body as any).fuel_price_per_litre_ariary_used
+        : (existing as any).fuel_price_per_litre_ariary_used
+    );
+    const consoRawForMode =
+      'fuel_consumption_l_per_km_used' in body
+        ? (body as any).fuel_consumption_l_per_km_used
+        : (existing as any).fuel_consumption_l_per_km_used;
+    const consoNumForMode =
+      typeof consoRawForMode === 'number'
+        ? consoRawForMode
+        : typeof consoRawForMode === 'string' && consoRawForMode.trim()
+          ? Number.parseFloat(consoRawForMode.trim())
+          : NaN;
+    const consoForMode = Number.isFinite(consoNumForMode) ? consoNumForMode : null;
+    const structuredOkForMode =
+      startForMode != null &&
+      endForMode != null &&
+      priceForMode != null &&
+      consoForMode != null &&
+      startForMode >= 0 &&
+      endForMode >= 0 &&
+      endForMode >= startForMode &&
+      endForMode - startForMode > 0 &&
+      priceForMode > 0 &&
+      consoForMode > 0;
+
+    if (requestedFuelModeRaw === 'legacy') {
+      nextFuelMode = 'legacy';
+    } else if (structuredOkForMode) {
+      nextFuelMode = 'structured';
+    } else {
+      nextFuelMode = 'legacy';
+    }
+    updateRow.fuel_mode = nextFuelMode;
+
+    if (nextFuelMode === 'legacy') {
+      // Fuel legacy income: manual debt (amount is declared, no structured fuel fields required).
+      const label =
+        ('label' in body ? asNonEmptyString(body.label) : null) ??
+        (asNonEmptyString(existing.label) ?? 'Carburant');
+      updateRow.label = label;
+
+      const amountRaw = 'amount_ariary' in body ? (body as any).amount_ariary : (existing as any).amount_ariary;
+      const amount = asInt(amountRaw);
+      if (amount == null || amount <= 0) {
+        throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+      }
+      updateRow.amount_ariary = amount;
+      // Keep odometer and any existing fuel snapshot fields as-is (non-destructive).
+      if ('odometer_km' in body) {
+        const v = (body as any).odometer_km;
+        const n = v == null ? null : asInt(v);
+        if (v != null && n == null) throw Object.assign(new Error('odometer_km must be an integer'), { status: 400 });
+        if (n != null && n < 0) throw Object.assign(new Error('odometer_km must be >= 0'), { status: 400 });
+        updateRow.odometer_km = n;
+      } else {
+        updateRow.odometer_km = (existing as any).odometer_km ?? null;
+      }
+      // Do not force/recompute fuel_due_ariary for legacy.
+      updateRow.fuel_due_ariary = (existing as any).fuel_due_ariary ?? null;
+      return await (async () => {
+        const { error } = await adminClient.from('fleet_vehicle_entries').update(updateRow).eq('id', entryId);
+        if (error) {
+          console.error('[admin-api] fleet(manual) entry patch', error.message);
+          return jsonResponse(400, { data: null, error: { message: error.message } });
+        }
+        return jsonResponse(200, { data: { ok: true }, error: null });
+      })();
+    }
+
     // Fuel consumption (income): computed entry. Amount is always derived.
     const label =
       ('label' in body ? asNonEmptyString(body.label) : null) ??
@@ -1927,6 +2241,89 @@ async function handleFleetVehicleEntryPatch(
     updateRow.fuel_recharge_litres_used = null;
     updateRow.fuel_recharge_km_credited_used = null;
   } else if (isFuel && nextEntryType === 'expense') {
+    const litresForMode = asNumber(
+      'fuel_recharge_litres_used' in body
+        ? (body as any).fuel_recharge_litres_used
+        : (existing as any).fuel_recharge_litres_used
+    );
+    const kmCreditedForMode = asNumber(
+      'fuel_recharge_km_credited_used' in body
+        ? (body as any).fuel_recharge_km_credited_used
+        : (existing as any).fuel_recharge_km_credited_used
+    );
+    const odoRawForMode = 'odometer_km' in body ? (body as any).odometer_km : (existing as any).odometer_km;
+    const odoForMode = odoRawForMode == null || odoRawForMode === '' ? null : asInt(odoRawForMode);
+    const priceForMode = asInt(
+      'fuel_price_per_litre_ariary_used' in body
+        ? (body as any).fuel_price_per_litre_ariary_used
+        : (existing as any).fuel_price_per_litre_ariary_used
+    );
+    const consoRawForMode =
+      'fuel_consumption_l_per_km_used' in body
+        ? (body as any).fuel_consumption_l_per_km_used
+        : (existing as any).fuel_consumption_l_per_km_used;
+    const consoNumForMode =
+      typeof consoRawForMode === 'number'
+        ? consoRawForMode
+        : typeof consoRawForMode === 'string' && String(consoRawForMode).trim()
+          ? Number.parseFloat(String(consoRawForMode).trim())
+          : NaN;
+    const consoForMode = Number.isFinite(consoNumForMode) ? consoNumForMode : null;
+    const structuredOkForMode =
+      litresForMode != null &&
+      kmCreditedForMode != null &&
+      litresForMode > 0 &&
+      kmCreditedForMode > 0 &&
+      odoForMode != null &&
+      odoForMode >= 0 &&
+      priceForMode != null &&
+      priceForMode > 0 &&
+      consoForMode != null &&
+      consoForMode > 0;
+
+    if (requestedFuelModeRaw === 'legacy') {
+      nextFuelMode = 'legacy';
+    } else if (structuredOkForMode) {
+      nextFuelMode = 'structured';
+    } else {
+      nextFuelMode = 'legacy';
+    }
+    updateRow.fuel_mode = nextFuelMode;
+
+    if (nextFuelMode === 'legacy') {
+      const label =
+        ('label' in body ? asNonEmptyString(body.label) : null) ??
+        (asNonEmptyString(existing.label) ?? 'Carburant');
+      updateRow.label = label;
+
+      const amountRaw = 'amount_ariary' in body ? (body as any).amount_ariary : (existing as any).amount_ariary;
+      const amount = asInt(amountRaw);
+      if (amount == null || amount <= 0) {
+        throw Object.assign(new Error('amount_ariary must be an integer > 0'), { status: 400 });
+      }
+      updateRow.amount_ariary = amount;
+
+      if ('odometer_km' in body) {
+        const v = (body as any).odometer_km;
+        const n = v == null ? null : asInt(v);
+        if (v != null && n == null) throw Object.assign(new Error('odometer_km must be an integer'), { status: 400 });
+        if (n != null && n < 0) throw Object.assign(new Error('odometer_km must be >= 0'), { status: 400 });
+        updateRow.odometer_km = n;
+      } else {
+        updateRow.odometer_km = (existing as any).odometer_km ?? null;
+      }
+
+      // Do not force structured recharge snapshots for legacy.
+      return await (async () => {
+        const { error } = await adminClient.from('fleet_vehicle_entries').update(updateRow).eq('id', entryId);
+        if (error) {
+          console.error('[admin-api] fleet(manual) entry patch', error.message);
+          return jsonResponse(400, { data: null, error: { message: error.message } });
+        }
+        return jsonResponse(200, { data: { ok: true }, error: null });
+      })();
+    }
+
     // Fuel recharge (expense): amount is provided, plus litres/km credited snapshots.
     const label =
       ('label' in body ? asNonEmptyString(body.label) : null) ??
@@ -2090,6 +2487,144 @@ async function handleFleetVehicleEntrySoftDelete(
   }
 
   return jsonResponse(200, { data: { ok: true }, error: null });
+}
+
+async function handleFleetVehicleEntryPaymentsCreate(
+  req: Request,
+  vehicleIdRaw: string,
+  entryIdRaw: string
+): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  const entryId = normalizePathId(entryIdRaw);
+  if (!isUuid(vehicleId)) return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  if (!isUuid(entryId)) return jsonResponse(400, { data: null, error: { message: 'Invalid entryId' } });
+
+  const { adminClient, userEmail } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+
+  const entry = await requireFleetVehicleEntryExists({ adminClient, vehicleId, entryId, allowDeleted: false });
+  const categoryNorm = String((entry as any).category ?? '').trim().toLowerCase();
+  const entryTypeNorm = String((entry as any).entry_type ?? '').trim().toLowerCase();
+
+  // Rule: payments only allowed for fuel income debts (carburant + income).
+  if (!(categoryNorm === 'carburant' && entryTypeNorm === 'income')) {
+    return jsonResponse(400, {
+      data: null,
+      error: { message: 'Payments are only allowed for carburant + income entries.' },
+    });
+  }
+
+  const due = asInt((entry as any).amount_ariary);
+  if (due == null || due <= 0) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid debt amount on entry.' } });
+  }
+
+  const body = await readJsonBody(req);
+  const amount = asInt((body as any).amount_ariary);
+  if (amount == null || amount <= 0) {
+    return jsonResponse(400, { data: null, error: { message: 'amount_ariary must be an integer > 0' } });
+  }
+
+  // Optional paid_at override (defaults to now()).
+  let paidAtIso: string | null = null;
+  if ('paid_at' in (body as any)) {
+    const raw = asNonEmptyString((body as any).paid_at);
+    if (raw) {
+      const d = new Date(raw);
+      if (!Number.isFinite(d.getTime())) {
+        return jsonResponse(400, { data: null, error: { message: 'paid_at must be a valid ISO timestamp' } });
+      }
+      paidAtIso = d.toISOString();
+    }
+  }
+
+  const notes = asNonEmptyString((body as any).notes);
+
+  // Compute total paid so far (active payments only).
+  const { data: paidRows, error: paidErr } = await adminClient
+    .from('fleet_vehicle_entry_payments')
+    .select('amount_ariary')
+    .eq('entry_id', entryId)
+    .is('deleted_at', null);
+  if (paidErr) {
+    console.error('[admin-api] fleet(manual) entry payments sum error', paidErr.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  let totalPaid = 0;
+  for (const r of (paidRows ?? []) as any[]) {
+    const v = asInt(r?.amount_ariary);
+    if (v != null && v > 0) totalPaid += v;
+  }
+  const remaining = due - totalPaid;
+  if (remaining <= 0) {
+    return jsonResponse(400, { data: null, error: { message: 'Debt is already fully paid.' } });
+  }
+
+  // Rule: forbid overpayment.
+  if (amount > remaining) {
+    return jsonResponse(400, {
+      data: null,
+      error: { message: `Payment amount exceeds remaining amount (${remaining} Ar).` },
+    });
+  }
+
+  const insertRow: Record<string, unknown> = {
+    entry_id: entryId,
+    amount_ariary: amount,
+    notes: notes ?? null,
+    updated_by: userEmail,
+  };
+  if (paidAtIso) insertRow.paid_at = paidAtIso;
+
+  const { data: inserted, error: insErr } = await adminClient
+    .from('fleet_vehicle_entry_payments')
+    .insert(insertRow)
+    .select('id')
+    .maybeSingle();
+  if (insErr) {
+    console.error('[admin-api] fleet(manual) entry payment create error', insErr.message);
+    return jsonResponse(400, { data: null, error: { message: insErr.message } });
+  }
+
+  return jsonResponse(200, { data: { payment_id: String((inserted as any)?.id ?? '') }, error: null });
+}
+
+async function handleFleetVehicleEntryPaymentsList(
+  req: Request,
+  vehicleIdRaw: string,
+  entryIdRaw: string
+): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  const entryId = normalizePathId(entryIdRaw);
+  if (!isUuid(vehicleId)) return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  if (!isUuid(entryId)) return jsonResponse(400, { data: null, error: { message: 'Invalid entryId' } });
+
+  const { adminClient } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+
+  const entry = await requireFleetVehicleEntryExists({ adminClient, vehicleId, entryId, allowDeleted: false });
+  const categoryNorm = String((entry as any).category ?? '').trim().toLowerCase();
+  const entryTypeNorm = String((entry as any).entry_type ?? '').trim().toLowerCase();
+  if (!(categoryNorm === 'carburant' && entryTypeNorm === 'income')) {
+    return jsonResponse(400, {
+      data: null,
+      error: { message: 'Payments are only available for carburant + income entries.' },
+    });
+  }
+
+  const { data, error } = await adminClient
+    .from('fleet_vehicle_entry_payments')
+    .select('id, entry_id, amount_ariary, paid_at, notes, created_at, deleted_at')
+    .eq('entry_id', entryId)
+    .is('deleted_at', null)
+    .order('paid_at', { ascending: false })
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) {
+    console.error('[admin-api] fleet(manual) entry payments list error', error.message);
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  return jsonResponse(200, { data: { items: data ?? [] }, error: null });
 }
 
 async function handleFleetVehicleFinancialSummary(req: Request, _url: URL, vehicleIdRaw: string): Promise<Response> {
@@ -2598,6 +3133,14 @@ Deno.serve(async (req) => {
         if (rest.length === 4 && rest[2] === 'entries' && req.method === 'DELETE') {
           const entryId = normalizePathId(rest[3] ?? '');
           return await handleFleetVehicleEntrySoftDelete(req, vehicleId, entryId);
+        }
+        if (rest.length === 5 && rest[2] === 'entries' && rest[4] === 'payments' && req.method === 'POST') {
+          const entryId = normalizePathId(rest[3] ?? '');
+          return await handleFleetVehicleEntryPaymentsCreate(req, vehicleId, entryId);
+        }
+        if (rest.length === 5 && rest[2] === 'entries' && rest[4] === 'payments' && req.method === 'GET') {
+          const entryId = normalizePathId(rest[3] ?? '');
+          return await handleFleetVehicleEntryPaymentsList(req, vehicleId, entryId);
         }
         if (rest.length === 3 && rest[2] === 'assignment' && req.method === 'GET') {
           return await handleFleetVehicleGetAssignment(req, vehicleId);

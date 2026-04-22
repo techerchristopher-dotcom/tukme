@@ -10,8 +10,10 @@ import {
   createFleetVehicleEntry,
   getDriversDailySummary,
   getFleetVehicle,
+  listFleetVehicleEntryPayments,
   patchFleetVehicleEntry,
   patchFleetVehicle,
+  createFleetVehicleEntryPayment,
   setFleetVehicleAssignment,
   softDeleteFleetVehicleEntry,
 } from '@/lib/adminApi';
@@ -21,6 +23,7 @@ import type {
   DriverDailySummaryRow,
   FleetEntryPatchInput,
   FleetEntryCreateInput,
+  FleetEntryPaymentRow,
   FleetFinancialSummary,
   FleetVehicleCreateInput,
   FleetVehicleDetailResponse,
@@ -36,6 +39,75 @@ function formatNumberFr(n: number, args?: { maxFrac?: number }): string {
 
 function asNonEmpty(v: unknown): string | null {
   return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+/** Nombre fini depuis la réponse API (int / float / string entier). */
+function financeNumberFromUnknown(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim()) {
+    const n = Number.parseInt(v.trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Compatibilité `financial_summary` : ancienne forme (`total_income_ariary`) ou déploiement encore sur
+ * la forme étendue (`total_income_received_ariary` / `total_income_theoretical_ariary` sans `total_income_ariary`).
+ * Total recettes affiché : reçu en priorité, sinon théorique, sinon champ legacy.
+ */
+function normalizeFleetFinancialSummary(
+  raw: unknown,
+  vehicleIdFallback: string
+): FleetFinancialSummary | null {
+  if (raw == null || typeof raw !== 'object') return null;
+  const s = raw as Record<string, unknown>;
+
+  let total_income_ariary: number | null = null;
+  for (const key of ['total_income_ariary', 'total_income_received_ariary', 'total_income_theoretical_ariary'] as const) {
+    if (!Object.prototype.hasOwnProperty.call(s, key)) continue;
+    const n = financeNumberFromUnknown(s[key]);
+    if (n !== null) {
+      total_income_ariary = n;
+      break;
+    }
+  }
+  if (total_income_ariary === null) total_income_ariary = 0;
+
+  const total_expense_ariary = financeNumberFromUnknown(s.total_expense_ariary) ?? 0;
+
+  let net_ariary = financeNumberFromUnknown(s.net_ariary);
+  if (net_ariary === null) {
+    net_ariary = total_income_ariary - total_expense_ariary;
+  }
+
+  const purchase_price_ariary = financeNumberFromUnknown(s.purchase_price_ariary);
+  let remaining_to_amortize_ariary = financeNumberFromUnknown(s.remaining_to_amortize_ariary);
+  if (remaining_to_amortize_ariary === null && purchase_price_ariary !== null) {
+    remaining_to_amortize_ariary = Math.max(purchase_price_ariary - net_ariary, 0);
+  }
+
+  let amortized_percent = financeNumberFromUnknown(s.amortized_percent);
+  if (amortized_percent === null && purchase_price_ariary !== null && purchase_price_ariary > 0) {
+    amortized_percent = Math.min(Math.max(net_ariary / purchase_price_ariary, 0), 1) * 100;
+  }
+
+  const vehicle_id = typeof s.vehicle_id === 'string' && s.vehicle_id.trim() ? s.vehicle_id.trim() : vehicleIdFallback;
+
+  return {
+    vehicle_id,
+    purchase_price_ariary: purchase_price_ariary ?? null,
+    purchase_date: typeof s.purchase_date === 'string' ? s.purchase_date : null,
+    amortization_months: financeNumberFromUnknown(s.amortization_months),
+    target_resale_price_ariary: financeNumberFromUnknown(s.target_resale_price_ariary),
+    daily_rent_ariary: financeNumberFromUnknown(s.daily_rent_ariary),
+    total_income_ariary,
+    total_expense_ariary,
+    net_ariary,
+    remaining_to_amortize_ariary: remaining_to_amortize_ariary ?? null,
+    amortized_percent: amortized_percent ?? null,
+    estimated_payoff_date: typeof s.estimated_payoff_date === 'string' ? s.estimated_payoff_date : null,
+  };
 }
 
 function normalizeFleetVehicleDetailResponse(raw: FleetVehicleDetailResponse): FleetVehicleDetailResponse {
@@ -55,8 +127,7 @@ function normalizeFleetVehicleDetailResponse(raw: FleetVehicleDetailResponse): F
 
   const active_assignment =
     (r.active_assignment as FleetVehicleDetailResponse['active_assignment']) ?? null;
-  const financial_summary =
-    (r.financial_summary as FleetVehicleDetailResponse['financial_summary']) ?? null;
+  const financial_summary = normalizeFleetFinancialSummary(r.financial_summary, vehicle.id);
   const fuel_summary = (r.fuel_summary as FleetVehicleDetailResponse['fuel_summary']) ?? null;
 
   return {
@@ -85,6 +156,36 @@ function parseFloatOrNull(s: string): number | null {
 
 function digitsOnly(s: string): string {
   return s.replace(/[^\d]/g, '');
+}
+
+/** Somme des montants des lignes de paiement (aligné sur la RPC `admin_fleet_entry_payments_aggregates`). */
+function sumFleetEntryPaymentAmounts(items: FleetEntryPaymentRow[]): number {
+  let s = 0;
+  for (const p of items) {
+    const a = typeof p.amount_ariary === 'number' ? p.amount_ariary : Number(p.amount_ariary ?? 0);
+    if (Number.isFinite(a)) s += Math.trunc(a);
+  }
+  return s;
+}
+
+/**
+ * Statut / payé / restant pour une dette carburant chauffeur (même règle que l’enrichissement admin-api).
+ * Utilisé après ajout de paiement pour mettre à jour la fiche sans attendre uniquement le re-fetch véhicule.
+ */
+function fuelIncomeDriverPaymentSummary(
+  dueAriary: number,
+  totalPaidFromLines: number
+): {
+  total_paid_ariary: number;
+  remaining_amount_ariary: number;
+  payment_status: 'unpaid' | 'partial' | 'paid';
+} {
+  const due = Math.trunc(Number.isFinite(dueAriary) ? dueAriary : 0);
+  const paid = Math.max(0, Math.trunc(Number.isFinite(totalPaidFromLines) ? totalPaidFromLines : 0));
+  const remaining = Math.max(0, due - paid);
+  const payment_status: 'unpaid' | 'partial' | 'paid' =
+    paid <= 0 ? 'unpaid' : paid < due ? 'partial' : 'paid';
+  return { total_paid_ariary: paid, remaining_amount_ariary: remaining, payment_status };
 }
 
 function computeFuelDerived(args: {
@@ -250,12 +351,15 @@ export default function FleetVehicleDetailPage() {
   const [entryOpen, setEntryOpen] = useState(false);
   const [entrySubmitting, setEntrySubmitting] = useState(false);
   const [entryError, setEntryError] = useState<string | null>(null);
+  const [entryPaymentPostError, setEntryPaymentPostError] = useState<string | null>(null);
   const [entryAmountText, setEntryAmountText] = useState<string>('');
   const [entryOdometerText, setEntryOdometerText] = useState<string>('');
   const [fuelKmStartText, setFuelKmStartText] = useState<string>('');
   const [fuelKmEndText, setFuelKmEndText] = useState<string>('');
   const [fuelPriceText, setFuelPriceText] = useState<string>('');
   const [fuelConsumptionText, setFuelConsumptionText] = useState<string>('');
+  const [entryImmediatePaymentAmountText, setEntryImmediatePaymentAmountText] = useState<string>('');
+  const [entryImmediatePaymentNotes, setEntryImmediatePaymentNotes] = useState<string>('');
   const [fuelRechargeLitresText, setFuelRechargeLitresText] = useState<string>('');
   const [fuelRechargeKmCreditedText, setFuelRechargeKmCreditedText] = useState<string>('');
   const [fuelRechargeOdometerText, setFuelRechargeOdometerText] = useState<string>('');
@@ -274,6 +378,12 @@ export default function FleetVehicleDetailPage() {
   const [detailSubmitting, setDetailSubmitting] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [selectedEntry, setSelectedEntry] = useState<FleetEntryRow | null>(null);
+  const [paymentsLoading, setPaymentsLoading] = useState(false);
+  const [paymentsError, setPaymentsError] = useState<string | null>(null);
+  const [payments, setPayments] = useState<FleetEntryPaymentRow[]>([]);
+  const [paymentAmountText, setPaymentAmountText] = useState<string>('');
+  const [paymentDate, setPaymentDate] = useState<string>(''); // YYYY-MM-DD optional
+  const [paymentNotes, setPaymentNotes] = useState<string>('');
 
   const [editAmountText, setEditAmountText] = useState<string>('');
   const [editOdometerText, setEditOdometerText] = useState<string>('');
@@ -459,12 +569,15 @@ export default function FleetVehicleDetailPage() {
 
   function openEntry() {
     setEntryError(null);
+    setEntryPaymentPostError(null);
     setEntryAmountText('');
     setEntryOdometerText('');
     setFuelKmStartText('');
     setFuelKmEndText('');
     setFuelPriceText('');
     setFuelConsumptionText('');
+    setEntryImmediatePaymentAmountText('');
+    setEntryImmediatePaymentNotes('');
     setFuelRechargeLitresText('');
     setFuelRechargeKmCreditedText('');
     setFuelRechargeOdometerText('');
@@ -698,6 +811,20 @@ export default function FleetVehicleDetailPage() {
         return;
       }
 
+      const paymentDigits = digitsOnly(entryImmediatePaymentAmountText);
+      const paymentAmount = paymentDigits ? Number.parseInt(paymentDigits, 10) : null;
+      const shouldCreatePayment = !!paymentDigits;
+      if (shouldCreatePayment) {
+        if (paymentAmount == null || !Number.isInteger(paymentAmount) || paymentAmount <= 0) {
+          setEntryError('Paiement reçu invalide (entier > 0).');
+          return;
+        }
+        if (paymentAmount > due) {
+          setEntryError('Paiement reçu ne peut pas dépasser le montant dû.');
+          return;
+        }
+      }
+
       setEntrySubmitting(true);
       const res = await createFleetVehicleEntry(data.vehicle.id, {
         entry_type: entryForm.entry_type,
@@ -705,6 +832,7 @@ export default function FleetVehicleDetailPage() {
         odometer_km: null,
         entry_date: entryForm.entry_date,
         category: 'carburant',
+        fuel_mode: 'structured',
         label: 'Carburant',
         notes: entryForm.notes?.trim() ? entryForm.notes.trim() : null,
 
@@ -715,11 +843,25 @@ export default function FleetVehicleDetailPage() {
         fuel_consumption_l_per_km_used: conso,
         fuel_due_ariary: due,
       });
-      setEntrySubmitting(false);
       if (res.error) {
+        setEntrySubmitting(false);
         setEntryError(res.error.message);
         return;
       }
+      const entryId = res.data?.entry_id ?? null;
+      if (shouldCreatePayment && paymentAmount != null && entryId) {
+        const payRes = await createFleetVehicleEntryPayment(data.vehicle.id, entryId, {
+          amount_ariary: paymentAmount,
+          paid_at: entryForm.entry_date,
+          notes: entryImmediatePaymentNotes.trim() ? entryImmediatePaymentNotes.trim() : null,
+        });
+        if (payRes.error) {
+          setEntryPaymentPostError(
+            'Paiement non enregistré. L’écriture a bien été créée — vous pouvez compléter via le détail.'
+          );
+        }
+      }
+      setEntrySubmitting(false);
       setEntryOpen(false);
       setRefreshSeq((s) => s + 1);
       return;
@@ -766,6 +908,7 @@ export default function FleetVehicleDetailPage() {
         odometer_km: odometerKm,
         entry_date: entryForm.entry_date,
         category: 'carburant',
+        fuel_mode: 'structured',
         label: 'Recharge carburant',
         notes: entryForm.notes?.trim() ? entryForm.notes.trim() : null,
 
@@ -883,6 +1026,12 @@ export default function FleetVehicleDetailPage() {
     setEditFuelConsumptionText('');
     setEditFuelRechargeLitresText('');
     setEditFuelRechargeKmCreditedText('');
+    setPayments([]);
+    setPaymentsError(null);
+    setPaymentsLoading(false);
+    setPaymentAmountText('');
+    setPaymentDate('');
+    setPaymentNotes('');
     setDetailOpen(true);
   }
 
@@ -965,10 +1114,108 @@ export default function FleetVehicleDetailPage() {
   }
 
   const editIsFuel = selectedEntry?.category?.trim().toLowerCase() === 'carburant';
+  const editIsFuelStructured = editIsFuel && (selectedEntry?.fuel_mode ?? 'structured') !== 'legacy';
   const editIsFuelRecharge =
-    editIsFuel && ((entryEditForm?.entry_type ?? selectedEntry?.entry_type) === 'expense');
+    editIsFuelStructured && ((entryEditForm?.entry_type ?? selectedEntry?.entry_type) === 'expense');
   const editIsFuelIncome =
-    editIsFuel && ((entryEditForm?.entry_type ?? selectedEntry?.entry_type) === 'income');
+    editIsFuelStructured && ((entryEditForm?.entry_type ?? selectedEntry?.entry_type) === 'income');
+
+  const isFuelIncomeDebt =
+    selectedEntry?.category?.trim().toLowerCase() === 'carburant' && selectedEntry?.entry_type === 'income';
+
+  useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      if (!detailOpen || detailMode !== 'read' || !data || !selectedEntry) return;
+      if (!isFuelIncomeDebt) return;
+      setPaymentsLoading(true);
+      setPaymentsError(null);
+      const res = await listFleetVehicleEntryPayments(data.vehicle.id, selectedEntry.id);
+      if (cancelled) return;
+      setPaymentsLoading(false);
+      if (res.error) {
+        setPaymentsError(res.error.message);
+        setPayments([]);
+        return;
+      }
+      setPayments(res.data.items ?? []);
+
+      const due = selectedEntry.amount_ariary;
+      const paid = typeof selectedEntry.total_paid_ariary === 'number' ? selectedEntry.total_paid_ariary : 0;
+      const remaining = Math.max(0, due - paid);
+      // Prefill amount only when there is an actual remaining balance.
+      if (!paymentAmountText.trim() && remaining > 0) {
+        setPaymentAmountText(String(remaining));
+      }
+      if (!paymentDate) {
+        setPaymentDate(selectedEntry.entry_date);
+      }
+    }
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [detailOpen, detailMode, data, selectedEntry, isFuelIncomeDebt]);
+
+  // Après re-fetch véhicule (`refreshSeq`), réaligner l’écriture ouverte avec l’entrée enrichie serveur
+  // (total payé, reste, statut) — évite état stale sur la carte « Paiement chauffeur » et la validation du 2e paiement.
+  useEffect(() => {
+    if (!detailOpen || detailMode !== 'read' || !selectedEntry?.id || !data?.recent_entries?.length) return;
+    const fresh = data.recent_entries.find((e) => e.id === selectedEntry.id);
+    if (!fresh) return;
+    setSelectedEntry((prev) => (prev && prev.id === fresh.id ? fresh : prev));
+  }, [data, detailOpen, detailMode, selectedEntry?.id]);
+
+  async function submitNewPayment(e: FormEvent) {
+    e.preventDefault();
+    if (!data || !selectedEntry) return;
+    if (!isFuelIncomeDebt) return;
+    setPaymentsError(null);
+
+    const due = selectedEntry.amount_ariary;
+    const paid = typeof selectedEntry.total_paid_ariary === 'number' ? selectedEntry.total_paid_ariary : 0;
+    const remaining = due - paid;
+    if (!Number.isFinite(remaining) || remaining <= 0 || selectedEntry.payment_status === 'paid') {
+      setPaymentsError('Dette soldée.');
+      return;
+    }
+
+    const amount = Number.parseInt(digitsOnly(paymentAmountText), 10);
+    if (!Number.isInteger(amount) || amount <= 0) {
+      setPaymentsError('Montant payé invalide (entier > 0).');
+      return;
+    }
+
+    const paidAt = paymentDate.trim() ? paymentDate.trim() : null;
+    const res = await createFleetVehicleEntryPayment(data.vehicle.id, selectedEntry.id, {
+      amount_ariary: amount,
+      paid_at: paidAt,
+      notes: paymentNotes.trim() ? paymentNotes.trim() : null,
+    });
+    if (res.error) {
+      setPaymentsError(res.error.message);
+      return;
+    }
+
+    // Refresh everything: payments history + computed status/remaining on entry list.
+    const listRes = await listFleetVehicleEntryPayments(data.vehicle.id, selectedEntry.id);
+    if (listRes.error) {
+      setPaymentsError(listRes.error.message);
+      return;
+    }
+    const paymentItems = listRes.data.items ?? [];
+    setPayments(paymentItems);
+    const paidSum = sumFleetEntryPaymentAmounts(paymentItems);
+    const dueAriary = selectedEntry.amount_ariary;
+    const summary = fuelIncomeDriverPaymentSummary(dueAriary, paidSum);
+    const entryId = selectedEntry.id;
+    setSelectedEntry((prev) =>
+      prev && prev.id === entryId ? { ...prev, ...summary } : prev
+    );
+    const nextRemaining = summary.remaining_amount_ariary;
+    setPaymentAmountText(nextRemaining > 0 ? String(nextRemaining) : '');
+    setRefreshSeq((s) => s + 1);
+  }
 
   const editFuelKmDay = useMemo(() => {
     if (!detailOpen || detailMode !== 'edit' || !editIsFuelIncome) return null;
@@ -978,7 +1225,15 @@ export default function FleetVehicleDetailPage() {
       priceText: editFuelPriceText,
       consumptionText: editFuelConsumptionText,
     }).kmDay;
-  }, [detailOpen, detailMode, editIsFuelIncome, editFuelKmStartText, editFuelKmEndText]);
+  }, [
+    detailOpen,
+    detailMode,
+    editIsFuelIncome,
+    editFuelKmStartText,
+    editFuelKmEndText,
+    editFuelPriceText,
+    editFuelConsumptionText,
+  ]);
 
   const editFuelDueAriary = useMemo(() => {
     if (!detailOpen || detailMode !== 'edit' || !editIsFuelIncome) return null;
@@ -1009,6 +1264,7 @@ export default function FleetVehicleDetailPage() {
       entry_type: entryEditForm.entry_type,
       entry_date: entryEditForm.entry_date,
       category: (entryEditForm.category ?? selectedEntry.category).trim(),
+      fuel_mode: entryEditForm.fuel_mode ?? selectedEntry.fuel_mode ?? null,
       label: entryEditForm.label ?? selectedEntry.label,
       notes: entryEditForm.notes ?? null,
     };
@@ -1124,6 +1380,11 @@ export default function FleetVehicleDetailPage() {
           </div>
         ) : data ? (
           <div className="space-y-6">
+            {entryPaymentPostError ? (
+              <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+                {entryPaymentPostError}
+              </div>
+            ) : null}
             <section className="rounded-xl border border-zinc-200 bg-white p-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
@@ -1419,6 +1680,24 @@ export default function FleetVehicleDetailPage() {
                           >
                             {e.entry_type}
                           </span>
+                          {String(e.category ?? '').trim().toLowerCase() === 'carburant' && e.entry_type === 'income' && e.payment_status ? (
+                            <span
+                              className={
+                                'ml-2 inline-block rounded-full border px-2 py-0.5 text-xs ' +
+                                (e.payment_status === 'paid'
+                                  ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                                  : e.payment_status === 'partial'
+                                    ? 'border-amber-200 bg-amber-50 text-amber-900'
+                                    : 'border-zinc-200 bg-white text-zinc-900')
+                              }
+                            >
+                              {e.payment_status === 'paid'
+                                ? 'payé'
+                                : e.payment_status === 'partial'
+                                  ? 'partiel'
+                                  : 'non payé'}
+                            </span>
+                          ) : null}
                         </td>
                         <td className="border-b border-zinc-100 px-2 py-2 tabular-nums font-semibold">
                           {formatAriary(e.amount_ariary)}
@@ -1438,7 +1717,17 @@ export default function FleetVehicleDetailPage() {
                                 ? new Intl.NumberFormat('fr-FR').format(e.odometer_km)
                                 : '—'}
                         </td>
-                        <td className="border-b border-zinc-100 px-2 py-2">{e.category}</td>
+                        <td className="border-b border-zinc-100 px-2 py-2">
+                          <span className="inline-flex items-center gap-2">
+                            <span>{e.category}</span>
+                            {String(e.category ?? '').trim().toLowerCase() === 'carburant' &&
+                            String(e.fuel_mode ?? '').trim().toLowerCase() === 'legacy' ? (
+                              <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-900">
+                                legacy
+                              </span>
+                            ) : null}
+                          </span>
+                        </td>
                         <td className="border-b border-zinc-100 px-2 py-2">{e.label}</td>
                         <td className="border-b border-zinc-100 px-2 py-2 text-zinc-700">{e.notes ?? '—'}</td>
                       </tr>
@@ -1457,7 +1746,7 @@ export default function FleetVehicleDetailPage() {
 
             {editOpen && editForm ? (
               <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
                 role="presentation"
                 onClick={() => !editSubmitting && setEditOpen(false)}
               >
@@ -1465,7 +1754,7 @@ export default function FleetVehicleDetailPage() {
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="edit-vehicle-title"
-                  className="w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  className="my-6 w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[calc(100vh-3rem)] overflow-y-auto"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
@@ -1658,7 +1947,7 @@ export default function FleetVehicleDetailPage() {
 
             {entryOpen ? (
               <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
                 role="presentation"
                 onClick={() => !entrySubmitting && setEntryOpen(false)}
               >
@@ -1666,7 +1955,7 @@ export default function FleetVehicleDetailPage() {
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="add-entry-title"
-                  className="w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  className="my-6 w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[calc(100vh-3rem)] overflow-y-auto"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
@@ -1746,6 +2035,56 @@ export default function FleetVehicleDetailPage() {
                               {fuelKmDay == null ? '—' : new Intl.NumberFormat('fr-FR').format(fuelKmDay)}
                             </div>
                           </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {/* Fuel + income: immediate payment entry (optional) */}
+                    {entryForm.entry_type === 'income' && entryForm.category === 'carburant' ? (
+                      <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-white p-4">
+                        <div className="text-sm font-semibold text-zinc-900">Paiement reçu maintenant</div>
+                        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <label className="flex flex-col gap-1 text-sm">
+                            <span className="text-zinc-700">Montant (Ar)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 outline-none focus:border-zinc-400"
+                              inputMode="numeric"
+                              placeholder="ex: 10 000"
+                              value={entryImmediatePaymentAmountText}
+                              onChange={(e) => setEntryImmediatePaymentAmountText(e.target.value)}
+                              onBlur={() => setEntryImmediatePaymentAmountText((v) => formatDigitsFr(v))}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
+                          <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-sm">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-xs text-zinc-600">Montant dû</div>
+                              <div className="font-semibold tabular-nums text-zinc-900">
+                                {fuelDueAriary == null ? '—' : `${formatAriary(fuelDueAriary)} Ar`}
+                              </div>
+                            </div>
+                            <div className="mt-2 flex items-center justify-between gap-3">
+                              <div className="text-xs text-zinc-600">Reste à payer</div>
+                              <div className="font-semibold tabular-nums text-zinc-900">
+                                {fuelDueAriary == null
+                                  ? '—'
+                                  : (() => {
+                                      const due = fuelDueAriary;
+                                      const paid = Number.parseInt(digitsOnly(entryImmediatePaymentAmountText), 10) || 0;
+                                      return `${formatAriary(Math.max(0, due - paid))} Ar`;
+                                    })()}
+                              </div>
+                            </div>
+                          </div>
+                          <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                            <span className="text-zinc-700">Note (optionnel)</span>
+                            <input
+                              className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                              value={entryImmediatePaymentNotes}
+                              onChange={(e) => setEntryImmediatePaymentNotes(e.target.value)}
+                              disabled={entrySubmitting}
+                            />
+                          </label>
                         </div>
                       </div>
                     ) : null}
@@ -2209,7 +2548,7 @@ export default function FleetVehicleDetailPage() {
 
             {detailOpen && selectedEntry ? (
               <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
                 role="presentation"
                 onClick={() => !detailSubmitting && setDetailOpen(false)}
               >
@@ -2217,7 +2556,7 @@ export default function FleetVehicleDetailPage() {
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="entry-detail-title"
-                  className="w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  className="my-6 w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[calc(100vh-3rem)] overflow-y-auto"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
@@ -2266,12 +2605,170 @@ export default function FleetVehicleDetailPage() {
                       </div>
                       <div className="rounded-lg border border-zinc-200 p-3">
                         <div className="text-xs text-zinc-600">Catégorie</div>
-                        <div className="mt-1 font-medium">{selectedEntry.category}</div>
+                        <div className="mt-1 font-medium">
+                          <span className="inline-flex items-center gap-2">
+                            <span>{selectedEntry.category}</span>
+                            {String(selectedEntry.category ?? '').trim().toLowerCase() === 'carburant' &&
+                            String(selectedEntry.fuel_mode ?? '').trim().toLowerCase() === 'legacy' ? (
+                              <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-900">
+                                legacy
+                              </span>
+                            ) : null}
+                          </span>
+                        </div>
                       </div>
                       <div className="rounded-lg border border-zinc-200 p-3">
                         <div className="text-xs text-zinc-600">Montant (Ar)</div>
                         <div className="mt-1 font-semibold tabular-nums">{formatAriary(selectedEntry.amount_ariary)} Ar</div>
                       </div>
+                      {selectedEntry.category?.trim().toLowerCase() === 'carburant' &&
+                      selectedEntry.entry_type === 'income' ? (
+                        <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <div className="text-xs font-medium text-indigo-900">Paiement chauffeur</div>
+                              <div className="mt-1 text-xs text-indigo-800">
+                                Suivi d’une dette issue de l’écriture carburant (income).
+                              </div>
+                            </div>
+                            {selectedEntry.payment_status ? (
+                              <span
+                                className={
+                                  'inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ' +
+                                  (selectedEntry.payment_status === 'paid'
+                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                                    : selectedEntry.payment_status === 'partial'
+                                      ? 'border-amber-200 bg-amber-50 text-amber-900'
+                                      : 'border-zinc-200 bg-white text-zinc-900')
+                                }
+                              >
+                                {selectedEntry.payment_status === 'paid'
+                                  ? 'payé'
+                                  : selectedEntry.payment_status === 'partial'
+                                    ? 'partiel'
+                                    : 'non payé'}
+                              </span>
+                            ) : null}
+                          </div>
+
+                          {(() => {
+                            const due = selectedEntry.amount_ariary;
+                            const paid =
+                              typeof selectedEntry.total_paid_ariary === 'number' && Number.isFinite(selectedEntry.total_paid_ariary)
+                                ? selectedEntry.total_paid_ariary
+                                : 0;
+                            const remaining =
+                              typeof selectedEntry.remaining_amount_ariary === 'number' && Number.isFinite(selectedEntry.remaining_amount_ariary)
+                                ? selectedEntry.remaining_amount_ariary
+                                : due - paid;
+                            const isSettled = selectedEntry.payment_status === 'paid' || remaining <= 0;
+                            return (
+                              <>
+                                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                                  <div className="rounded-lg border border-indigo-200 bg-white p-3">
+                                    <div className="text-xs text-indigo-900">Dû</div>
+                                    <div className="mt-1 font-semibold tabular-nums text-indigo-950">
+                                      {formatAriary(due)} Ar
+                                    </div>
+                                  </div>
+                                  <div className="rounded-lg border border-indigo-200 bg-white p-3">
+                                    <div className="text-xs text-indigo-900">Payé</div>
+                                    <div className="mt-1 font-semibold tabular-nums text-indigo-950">
+                                      {formatAriary(paid)} Ar
+                                    </div>
+                                  </div>
+                                  <div className="rounded-lg border border-indigo-200 bg-white p-3">
+                                    <div className="text-xs text-indigo-900">Reste</div>
+                                    <div className="mt-1 font-semibold tabular-nums text-indigo-950">
+                                      {formatAriary(remaining)} Ar
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="mt-3 rounded-lg border border-indigo-200 bg-white p-3">
+                                  <div className="text-xs font-medium text-indigo-900">Historique des paiements</div>
+                                  {paymentsLoading ? (
+                                    <div className="mt-2 text-sm text-indigo-900/80">Chargement…</div>
+                                  ) : paymentsError ? (
+                                    <div className="mt-2 text-sm text-red-900">{paymentsError}</div>
+                                  ) : payments.length ? (
+                                    <div className="mt-2 space-y-2">
+                                      {payments.map((p) => (
+                                        <div
+                                          key={p.id}
+                                          className="flex items-start justify-between gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2"
+                                        >
+                                          <div>
+                                            <div className="text-sm font-medium tabular-nums text-zinc-900">
+                                              {formatAriary(p.amount_ariary)} Ar
+                                            </div>
+                                            <div className="text-xs text-zinc-600">
+                                              {new Date(p.paid_at).toLocaleString('fr-FR')}
+                                            </div>
+                                            {p.notes?.trim() ? (
+                                              <div className="mt-1 text-xs text-zinc-700">{p.notes}</div>
+                                            ) : null}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <div className="mt-2 text-sm text-zinc-600">Aucun paiement enregistré.</div>
+                                  )}
+                                </div>
+
+                                {isSettled ? (
+                                  <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+                                    Dette soldée.
+                                  </div>
+                                ) : (
+                                  <form className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2" onSubmit={submitNewPayment}>
+                                    <label className="flex flex-col gap-1 text-sm">
+                                      <span className="text-indigo-900">Montant payé (Ar)</span>
+                                      <input
+                                        className="rounded-lg border border-indigo-200 bg-white px-3 py-2 outline-none focus:border-indigo-400"
+                                        inputMode="numeric"
+                                        value={paymentAmountText}
+                                        onChange={(e) => setPaymentAmountText(e.target.value)}
+                                        onBlur={() => setPaymentAmountText((v) => formatDigitsFr(v))}
+                                        disabled={detailSubmitting}
+                                      />
+                                    </label>
+                                    <label className="flex flex-col gap-1 text-sm">
+                                      <span className="text-indigo-900">Date (optionnel)</span>
+                                      <input
+                                        className="rounded-lg border border-indigo-200 bg-white px-3 py-2 outline-none focus:border-indigo-400"
+                                        type="date"
+                                        value={paymentDate}
+                                        onChange={(e) => setPaymentDate(e.target.value)}
+                                        disabled={detailSubmitting}
+                                      />
+                                    </label>
+                                    <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                                      <span className="text-indigo-900">Note (optionnel)</span>
+                                      <input
+                                        className="rounded-lg border border-indigo-200 bg-white px-3 py-2 outline-none focus:border-indigo-400"
+                                        value={paymentNotes}
+                                        onChange={(e) => setPaymentNotes(e.target.value)}
+                                        disabled={detailSubmitting}
+                                      />
+                                    </label>
+                                    <div className="sm:col-span-2 flex justify-end">
+                                      <button
+                                        type="submit"
+                                        className="rounded-lg border border-indigo-800 bg-indigo-900 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-800 disabled:opacity-50"
+                                        disabled={detailSubmitting}
+                                      >
+                                        Ajouter un paiement
+                                      </button>
+                                    </div>
+                                  </form>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      ) : null}
                       {selectedEntry.category?.trim().toLowerCase() === 'carburant' &&
                       selectedEntry.entry_type === 'income' ? (
                         <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
@@ -2565,14 +3062,33 @@ export default function FleetVehicleDetailPage() {
                           </label>
                           <label className="flex flex-col gap-1 text-sm sm:col-span-2">
                             <span className="text-zinc-700">Catégorie</span>
-                            <input
+                            <select
                               className="rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                               value={String(entryEditForm.category ?? selectedEntry.category)}
-                              onChange={(e) =>
-                                setEntryEditForm((p) => (p ? { ...p, category: e.target.value } : p))
-                              }
+                              onChange={(e) => {
+                                const next = e.target.value;
+                                setEntryEditForm((p) =>
+                                  p
+                                    ? {
+                                        ...p,
+                                        category: next,
+                                        // Keep fuel_mode empty unless user explicitly chooses it later;
+                                        // backend will infer legacy vs structured when switching to carburant.
+                                        fuel_mode: next === 'carburant' ? (p.fuel_mode ?? null) : null,
+                                      }
+                                    : p
+                                );
+                              }}
                               disabled={detailSubmitting}
-                            />
+                            >
+                              <option value="achat_vehicule">achat_vehicule</option>
+                              <option value="loyer">loyer</option>
+                              <option value="entretien">entretien</option>
+                              <option value="reparation">reparation</option>
+                              <option value="carburant">carburant</option>
+                              <option value="assurance">assurance</option>
+                              <option value="autre">autre</option>
+                            </select>
                           </label>
                           <label className="flex flex-col gap-1 text-sm sm:col-span-2">
                             <span className="text-zinc-700">Libellé</span>
@@ -2644,7 +3160,7 @@ export default function FleetVehicleDetailPage() {
 
             {assignOpen ? (
               <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
                 role="presentation"
                 onClick={() => !assignSubmitting && setAssignOpen(false)}
               >
@@ -2652,7 +3168,7 @@ export default function FleetVehicleDetailPage() {
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="assign-title"
-                  className="w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  className="my-6 w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[calc(100vh-3rem)] overflow-y-auto"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => e.stopPropagation()}
                 >

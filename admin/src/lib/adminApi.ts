@@ -20,6 +20,7 @@ import type {
   FleetVehiclePatchInput,
   FleetEntryCreateInput,
   FleetEntryPatchInput,
+  FleetEntryPaymentRow,
   Paginated,
   PayoutRow,
   PlatformDailySummary,
@@ -687,6 +688,57 @@ export async function patchFleetVehicle(
     path: `/fleet/vehicles/${encodeURIComponent(id)}`,
     method: 'PATCH',
     body: patch as Record<string, unknown>,
+  });
+}
+
+export async function listFleetVehicleEntryPayments(
+  vehicleId: string,
+  entryId: string
+): Promise<ApiResult<{ items: FleetEntryPaymentRow[] }>> {
+  const vid = vehicleId.trim();
+  if (!isUuidString(vid)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  const eid = entryId.trim();
+  if (!isUuidString(eid)) {
+    return { data: null, error: { message: 'Identifiant écriture invalide' } };
+  }
+  return fetchAdmin(
+    `/fleet/vehicles/${encodeURIComponent(vid)}/entries/${encodeURIComponent(eid)}/payments`
+  );
+}
+
+export async function createFleetVehicleEntryPayment(
+  vehicleId: string,
+  entryId: string,
+  input: {
+    amount_ariary: number;
+    paid_at?: string | null;
+    notes?: string | null;
+  }
+): Promise<ApiResult<{ payment_id: string }>> {
+  const vid = vehicleId.trim();
+  if (!isUuidString(vid)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  const eid = entryId.trim();
+  if (!isUuidString(eid)) {
+    return { data: null, error: { message: 'Identifiant écriture invalide' } };
+  }
+  const amount = input.amount_ariary;
+  if (!Number.isInteger(amount) || amount <= 0) {
+    return { data: null, error: { message: 'amount_ariary doit être un entier > 0' } };
+  }
+  return callAdminJson<{ payment_id: string }>({
+    path: `/fleet/vehicles/${encodeURIComponent(vid)}/entries/${encodeURIComponent(eid)}/payments`,
+    method: 'POST',
+    body: {
+      amount_ariary: amount,
+      ...(input.paid_at != null && String(input.paid_at).trim()
+        ? { paid_at: String(input.paid_at).trim() }
+        : {}),
+      notes: input.notes ?? null,
+    },
   });
 }
 
