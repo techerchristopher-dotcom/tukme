@@ -275,6 +275,10 @@ export type FleetFinancialSummary = {
   remaining_to_amortize_ariary: number | null;
   amortized_percent: number | null;
   estimated_payoff_date: string | null;
+  /** Dette ouverte chauffeur (carburant income) calculée serveur. */
+  driver_debt_ariary?: number;
+  /** Nombre d’écritures carburant income avec remaining > 0. */
+  driver_debt_open_entries_count?: number;
 };
 
 export type FleetVehicleDetailResponse = {
@@ -379,6 +383,23 @@ export type FleetEntryPaymentRow = {
   paid_at: string;
   notes: string | null;
   created_at: string;
+};
+
+export type FleetVehicleOpenFuelIncomeDebtItem = {
+  entry_id: string;
+  entry_date: string;
+  description: string;
+  amount_ariary: number;
+  total_paid_ariary: number;
+  remaining_amount_ariary: number;
+  payment_status: 'non payé' | 'partiel';
+  is_legacy: boolean;
+};
+
+export type FleetVehicleOpenFuelIncomeDebtsResponse = {
+  driver_debt_ariary: number;
+  driver_debt_open_entries_count: number;
+  items: FleetVehicleOpenFuelIncomeDebtItem[];
 };
 
 export type FleetAssignmentCreateInput = {

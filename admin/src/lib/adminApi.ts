@@ -20,6 +20,7 @@ import type {
   FleetVehiclePatchInput,
   FleetEntryCreateInput,
   FleetEntryPatchInput,
+  FleetVehicleOpenFuelIncomeDebtsResponse,
   FleetEntryPaymentRow,
   Paginated,
   PayoutRow,
@@ -651,6 +652,16 @@ export async function getFleetVehicle(vehicleId: string): Promise<ApiResult<Flee
     return { data: null, error: { message: 'Identifiant véhicule invalide' } };
   }
   return fetchAdmin(`/fleet/vehicles/${encodeURIComponent(id)}`);
+}
+
+export async function getFleetVehicleOpenFuelIncomeDebts(
+  vehicleId: string
+): Promise<ApiResult<FleetVehicleOpenFuelIncomeDebtsResponse>> {
+  const id = vehicleId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  return fetchAdmin(`/fleet/vehicles/${encodeURIComponent(id)}/open-fuel-income-debts`);
 }
 
 export async function createFleetVehicle(

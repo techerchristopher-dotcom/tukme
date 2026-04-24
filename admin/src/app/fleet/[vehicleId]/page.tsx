@@ -10,6 +10,7 @@ import {
   createFleetVehicleEntry,
   getDriversDailySummary,
   getFleetVehicle,
+  getFleetVehicleOpenFuelIncomeDebts,
   listFleetVehicleEntryPayments,
   patchFleetVehicleEntry,
   patchFleetVehicle,
@@ -29,6 +30,8 @@ import type {
   FleetVehicleDetailResponse,
   FleetEntryRow,
   FleetVehicleStatus,
+  FleetVehicleOpenFuelIncomeDebtsResponse,
+  FleetVehicleOpenFuelIncomeDebtItem,
 } from '@/lib/types';
 import { isUuidString, normalizeUuidParam } from '@/lib/uuid';
 
@@ -107,6 +110,8 @@ function normalizeFleetFinancialSummary(
     remaining_to_amortize_ariary: remaining_to_amortize_ariary ?? null,
     amortized_percent: amortized_percent ?? null,
     estimated_payoff_date: typeof s.estimated_payoff_date === 'string' ? s.estimated_payoff_date : null,
+    driver_debt_ariary: financeNumberFromUnknown(s.driver_debt_ariary) ?? 0,
+    driver_debt_open_entries_count: financeNumberFromUnknown(s.driver_debt_open_entries_count) ?? 0,
   };
 }
 
@@ -385,6 +390,11 @@ export default function FleetVehicleDetailPage() {
   const [paymentDate, setPaymentDate] = useState<string>(''); // YYYY-MM-DD optional
   const [paymentNotes, setPaymentNotes] = useState<string>('');
 
+  const [debtOpen, setDebtOpen] = useState(false);
+  const [debtLoading, setDebtLoading] = useState(false);
+  const [debtError, setDebtError] = useState<string | null>(null);
+  const [debtData, setDebtData] = useState<FleetVehicleOpenFuelIncomeDebtsResponse | null>(null);
+
   const [editAmountText, setEditAmountText] = useState<string>('');
   const [editOdometerText, setEditOdometerText] = useState<string>('');
   const [editFuelKmStartText, setEditFuelKmStartText] = useState<string>('');
@@ -442,6 +452,30 @@ export default function FleetVehicleDetailPage() {
       cancelled = true;
     };
   }, [vehicleId, refreshSeq]);
+
+  // Driver debt modal: fetch items on open, and refresh after payments (refreshSeq).
+  useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      if (!debtOpen) return;
+      if (!vehicleId || !isUuidString(vehicleId)) return;
+      setDebtLoading(true);
+      setDebtError(null);
+      const res = await getFleetVehicleOpenFuelIncomeDebts(vehicleId);
+      if (cancelled) return;
+      if (res.error) {
+        setDebtData(null);
+        setDebtError(res.error.message);
+      } else {
+        setDebtData(res.data);
+      }
+      setDebtLoading(false);
+    }
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [debtOpen, vehicleId, refreshSeq]);
 
   useEffect(() => {
     if (!editOpen && !entryOpen && !assignOpen && !detailOpen) return;
@@ -1035,6 +1069,25 @@ export default function FleetVehicleDetailPage() {
     setDetailOpen(true);
   }
 
+  function openDebtEntryDetail(item: FleetVehicleOpenFuelIncomeDebtItem) {
+    const id = String(item.entry_id ?? '').trim();
+    if (!id) {
+      setDebtError("Impossible d’ouvrir l’écriture : entry_id manquant.");
+      return;
+    }
+    const entry = recentEntries.find((e) => e.id === id) ?? null;
+    if (!entry) {
+      setDebtError(
+        "Cette dette n’est pas dans la liste des écritures récentes. " +
+          "Rafraîchissez la page ou ouvrez l’écriture depuis le journal si elle est visible."
+      );
+      return;
+    }
+    setDebtOpen(false);
+    setDebtError(null);
+    openEntryDetail(entry);
+  }
+
   function beginEditEntry() {
     if (!selectedEntry) return;
     setDetailError(null);
@@ -1615,7 +1668,7 @@ export default function FleetVehicleDetailPage() {
             <section className="rounded-xl border border-zinc-200 bg-white p-4">
               <h2 className="text-sm font-semibold text-zinc-900">Synthèse financière</h2>
               {summary ? (
-                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
                   {kpiCard('Total recettes', `${formatAriary(summary.total_income_ariary)} Ar`)}
                   {kpiCard('Total dépenses', `${formatAriary(summary.total_expense_ariary)} Ar`)}
                   {kpiCard('Net', `${formatAriary(summary.net_ariary)} Ar`)}
@@ -1626,11 +1679,146 @@ export default function FleetVehicleDetailPage() {
                       : `${formatAriary(summary.remaining_to_amortize_ariary)} Ar`
                   )}
                   {kpiCard('% amorti', fmtPct(summary.amortized_percent))}
+                  {(() => {
+                    const debt = typeof summary.driver_debt_ariary === 'number' && Number.isFinite(summary.driver_debt_ariary)
+                      ? Math.max(0, Math.trunc(summary.driver_debt_ariary))
+                      : 0;
+                    const cnt = typeof summary.driver_debt_open_entries_count === 'number' && Number.isFinite(summary.driver_debt_open_entries_count)
+                      ? Math.max(0, Math.trunc(summary.driver_debt_open_entries_count))
+                      : 0;
+                    const hint = cnt <= 0 ? 'Aucune dette ouverte' : cnt === 1 ? '1 écriture ouverte' : `${cnt} écritures ouvertes`;
+                    return (
+                      <button
+                        type="button"
+                        className="text-left"
+                        onClick={() => setDebtOpen(true)}
+                        disabled={cnt <= 0}
+                        title={cnt <= 0 ? 'Aucune dette ouverte' : 'Voir le détail'}
+                      >
+                        <div className={cnt > 0 ? 'cursor-pointer hover:bg-zinc-50 rounded-lg' : ''}>
+                          {kpiCard('Dette chauffeur', `${formatAriary(debt)} Ar`, hint)}
+                        </div>
+                      </button>
+                    );
+                  })()}
                 </div>
               ) : (
                 <div className="mt-2 text-sm text-zinc-600">—</div>
               )}
             </section>
+
+            {debtOpen ? (
+              <div
+                className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
+                role="presentation"
+                onClick={() => !debtLoading && setDebtOpen(false)}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="debt-detail-title"
+                  className="my-6 w-full max-w-3xl rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[calc(100vh-3rem)] overflow-y-auto"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h2 id="debt-detail-title" className="text-lg font-semibold text-zinc-900">
+                        Détail dette chauffeur
+                      </h2>
+                      <div className="mt-1 text-xs text-zinc-600">
+                        {debtData
+                          ? `${formatAriary(debtData.driver_debt_ariary)} Ar — ${debtData.driver_debt_open_entries_count} écriture(s) ouverte(s)`
+                          : '—'}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
+                      onClick={() => setDebtOpen(false)}
+                    >
+                      Fermer
+                    </button>
+                  </div>
+
+                  {debtLoading ? (
+                    <div className="mt-4 text-sm text-zinc-600">Chargement…</div>
+                  ) : debtError ? (
+                    <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+                      {debtError}
+                    </div>
+                  ) : debtData && debtData.items.length === 0 ? (
+                    <div className="mt-4 text-sm text-zinc-600">Aucune dette ouverte.</div>
+                  ) : debtData ? (
+                    <div className="mt-4 overflow-x-auto">
+                      <table className="min-w-full border-separate border-spacing-0 text-sm">
+                        <thead>
+                          <tr className="text-left text-xs text-zinc-600">
+                            <th className="border-b border-zinc-200 px-2 py-2">Date</th>
+                            <th className="border-b border-zinc-200 px-2 py-2">Libellé</th>
+                            <th className="border-b border-zinc-200 px-2 py-2">Dû (Ar)</th>
+                            <th className="border-b border-zinc-200 px-2 py-2">Payé (Ar)</th>
+                            <th className="border-b border-zinc-200 px-2 py-2">Reste (Ar)</th>
+                            <th className="border-b border-zinc-200 px-2 py-2">Statut</th>
+                            <th className="border-b border-zinc-200 px-2 py-2">Legacy</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(debtData.items as FleetVehicleOpenFuelIncomeDebtItem[]).map((it) => (
+                            <tr
+                              key={it.entry_id}
+                              className="cursor-pointer hover:bg-zinc-50"
+                              role="button"
+                              tabIndex={0}
+                              title="Ouvrir l’écriture"
+                              onClick={() => openDebtEntryDetail(it)}
+                              onKeyDown={(ev) => {
+                                if (ev.key === 'Enter' || ev.key === ' ') openDebtEntryDetail(it);
+                              }}
+                            >
+                              <td className="border-b border-zinc-100 px-2 py-2">{it.entry_date}</td>
+                              <td className="border-b border-zinc-100 px-2 py-2">{it.description}</td>
+                              <td className="border-b border-zinc-100 px-2 py-2 tabular-nums font-medium">
+                                {formatAriary(it.amount_ariary)}
+                              </td>
+                              <td className="border-b border-zinc-100 px-2 py-2 tabular-nums text-zinc-700">
+                                {formatAriary(it.total_paid_ariary)}
+                              </td>
+                              <td className="border-b border-zinc-100 px-2 py-2 tabular-nums font-semibold">
+                                {formatAriary(it.remaining_amount_ariary)}
+                              </td>
+                              <td className="border-b border-zinc-100 px-2 py-2">
+                                <span
+                                  className={
+                                    'inline-block rounded-full border px-2 py-0.5 text-xs ' +
+                                    (it.payment_status === 'partiel'
+                                      ? 'border-amber-200 bg-amber-50 text-amber-900'
+                                      : 'border-zinc-200 bg-white text-zinc-900')
+                                  }
+                                >
+                                  {it.payment_status}
+                                </span>
+                              </td>
+                              <td className="border-b border-zinc-100 px-2 py-2">
+                                {it.is_legacy ? (
+                                  <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-900">
+                                    legacy
+                                  </span>
+                                ) : (
+                                  '—'
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="mt-4 text-sm text-zinc-600">—</div>
+                  )}
+                </div>
+              </div>
+            ) : null}
 
             <section className="rounded-xl border border-zinc-200 bg-white p-4">
               <div className="flex items-center justify-between gap-3">

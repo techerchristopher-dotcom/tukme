@@ -1341,6 +1341,10 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
       total_income_ariary: income,
       total_expense_ariary: expense,
     });
+    // Driver debt KPI (source of truth: payments table + RPC).
+    const driverDebt = openFuelIncomeDebt ?? { open_remaining_ariary: 0, open_entries_count: 0 };
+    (summary as any).driver_debt_ariary = driverDebt.open_remaining_ariary;
+    (summary as any).driver_debt_open_entries_count = driverDebt.open_entries_count;
 
     stage = 'shape response (active_assignment)';
     const active = activeAssign
@@ -2672,7 +2676,112 @@ async function handleFleetVehicleFinancialSummary(req: Request, _url: URL, vehic
     total_expense_ariary: expense,
   });
 
+  // Driver debt KPI: open remaining for fuel income debts (carburant + income).
+  let driverDebtAriary = 0;
+  let driverDebtOpenCount = 0;
+  try {
+    const { data: openRows, error: openErr } = await adminClient.rpc('admin_fleet_vehicle_open_fuel_income_debt', {
+      p_vehicle_id: vehicleId,
+    });
+    if (openErr) {
+      console.error('[admin-api] fleet(manual) financial-summary open fuel debt rpc error', {
+        vehicleId,
+        message: openErr.message,
+      });
+    } else {
+      const first = Array.isArray(openRows) ? (openRows[0] as any) : (openRows as any);
+      const rem =
+        typeof first?.open_remaining_ariary === 'number'
+          ? first.open_remaining_ariary
+          : Number(first?.open_remaining_ariary ?? 0);
+      const cnt =
+        typeof first?.open_entries_count === 'number'
+          ? first.open_entries_count
+          : Number(first?.open_entries_count ?? 0);
+      driverDebtAriary = Number.isFinite(rem) ? Math.max(0, Math.trunc(rem)) : 0;
+      driverDebtOpenCount = Number.isFinite(cnt) ? Math.max(0, Math.trunc(cnt)) : 0;
+    }
+  } catch (e) {
+    console.error('[admin-api] fleet(manual) financial-summary open fuel debt unhandled', {
+      vehicleId,
+      message: e instanceof Error ? e.message : String(e),
+    });
+  }
+  (summary as any).driver_debt_ariary = driverDebtAriary;
+  (summary as any).driver_debt_open_entries_count = driverDebtOpenCount;
+
   return jsonResponse(200, { data: summary, error: null });
+}
+
+type OpenFuelIncomeDebtItem = {
+  entry_id: string;
+  entry_date: string;
+  description: string;
+  amount_ariary: number;
+  total_paid_ariary: number;
+  remaining_amount_ariary: number;
+  payment_status: 'non payé' | 'partiel';
+  is_legacy: boolean;
+};
+
+async function handleFleetVehicleOpenFuelIncomeDebts(req: Request, vehicleIdRaw: string): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  if (!isUuid(vehicleId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  }
+  const { adminClient } = await requireAdmin(req);
+
+  const { data, error } = await adminClient.rpc('admin_fleet_vehicle_open_fuel_income_debt_details', {
+    p_vehicle_id: vehicleId,
+  });
+  if (error) {
+    console.error('[admin-api] fleet(manual) open-fuel-income-debts rpc error', {
+      vehicleId,
+      message: error.message,
+    });
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+
+  const items: OpenFuelIncomeDebtItem[] = [];
+  let total = 0;
+
+  for (const r of (data ?? []) as any[]) {
+    const remaining =
+      typeof r?.remaining_amount_ariary === 'number'
+        ? r.remaining_amount_ariary
+        : Number(r?.remaining_amount_ariary ?? 0);
+    const remainingInt = Number.isFinite(remaining) ? Math.max(0, Math.trunc(remaining)) : 0;
+    if (remainingInt <= 0) continue;
+
+    const due = typeof r?.amount_ariary === 'number' ? r.amount_ariary : Number(r?.amount_ariary ?? 0);
+    const paid = typeof r?.total_paid_ariary === 'number' ? r.total_paid_ariary : Number(r?.total_paid_ariary ?? 0);
+    const dueInt = Number.isFinite(due) ? Math.max(0, Math.trunc(due)) : 0;
+    const paidInt = Number.isFinite(paid) ? Math.max(0, Math.trunc(paid)) : 0;
+
+    const statusRaw = String(r?.payment_status ?? '').trim().toLowerCase();
+    const payment_status: 'non payé' | 'partiel' = statusRaw === 'partial' ? 'partiel' : 'non payé';
+
+    items.push({
+      entry_id: String(r?.entry_id ?? ''),
+      entry_date: String(r?.entry_date ?? ''),
+      description: String(r?.description ?? ''),
+      amount_ariary: dueInt,
+      total_paid_ariary: paidInt,
+      remaining_amount_ariary: remainingInt,
+      payment_status,
+      is_legacy: !!r?.is_legacy,
+    });
+    total += remainingInt;
+  }
+
+  return jsonResponse(200, {
+    data: {
+      driver_debt_ariary: total,
+      driver_debt_open_entries_count: items.length,
+      items,
+    },
+    error: null,
+  });
 }
 
 type CreatePayoutInput = {
@@ -3126,6 +3235,9 @@ Deno.serve(async (req) => {
         const vehicleId = normalizePathId(rest[1] ?? '');
         if (rest.length === 2 && req.method === 'GET') return await handleFleetVehicleGet(req, url, vehicleId);
         if (rest.length === 2 && req.method === 'PATCH') return await handleFleetVehiclePatch(req, vehicleId);
+        if (rest.length === 3 && rest[2] === 'open-fuel-income-debts' && req.method === 'GET') {
+          return await handleFleetVehicleOpenFuelIncomeDebts(req, vehicleId);
+        }
         if (rest.length === 4 && rest[2] === 'entries' && req.method === 'PATCH') {
           const entryId = normalizePathId(rest[3] ?? '');
           return await handleFleetVehicleEntryPatch(req, vehicleId, entryId);
