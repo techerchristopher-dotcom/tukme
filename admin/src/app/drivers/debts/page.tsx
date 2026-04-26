@@ -7,6 +7,7 @@ import { AdminShell } from '@/components/layout/AdminShell';
 import { RequireAuth } from '@/components/auth/RequireAuth';
 import { FleetEntryPaymentModal } from '@/components/fleet/FleetEntryPaymentModal';
 import { getDriverDebtsDetail, getDriverDebtsSummary } from '@/lib/adminApi';
+import { useBusinessDate } from '@/hooks/useBusinessDate';
 import { formatAriary } from '@/lib/money';
 import type { DriverDebtDetailItem, DriverDebtSummaryItem } from '@/lib/types';
 
@@ -38,6 +39,8 @@ function paymentStatusLabel(s: DriverDebtDetailItem['payment_status']): string {
 }
 
 export default function DriversDebtsPage() {
+  const { businessDate } = useBusinessDate();
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [items, setItems] = useState<DriverDebtSummaryItem[]>([]);
@@ -133,6 +136,18 @@ export default function DriversDebtsPage() {
     }
     return { total, fuel, rent };
   }, [detailItems]);
+
+  function daysSince(dateYmd: string | null | undefined): number | null {
+    if (!dateYmd || !String(dateYmd).trim()) return null;
+    const s = String(dateYmd).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) return null;
+    const a = new Date(`${businessDate}T00:00:00.000Z`);
+    const b = new Date(`${s}T00:00:00.000Z`);
+    const ms = a.getTime() - b.getTime();
+    if (!Number.isFinite(ms)) return null;
+    return Math.max(0, Math.floor(ms / 86_400_000));
+  }
 
   function openDetail(row: DriverDebtSummaryItem) {
     setDetailDriver(row);
@@ -312,6 +327,7 @@ export default function DriversDebtsPage() {
                       <th className="px-3 py-2 text-right">Payé</th>
                       <th className="px-3 py-2 text-right">Reste</th>
                       <th className="px-3 py-2">Statut</th>
+                      <th className="px-3 py-2">Ancienneté</th>
                       <th className="px-3 py-2">Période</th>
                       <th className="px-3 py-2"></th>
                     </tr>
@@ -319,13 +335,13 @@ export default function DriversDebtsPage() {
                   <tbody className="divide-y divide-zinc-200 bg-white">
                     {detailLoading ? (
                       <tr>
-                        <td className="px-3 py-4 text-sm text-zinc-600" colSpan={10}>
+                        <td className="px-3 py-4 text-sm text-zinc-600" colSpan={11}>
                           Chargement…
                         </td>
                       </tr>
                     ) : detailItems.length === 0 ? (
                       <tr>
-                        <td className="px-3 py-4 text-sm text-zinc-600" colSpan={10}>
+                        <td className="px-3 py-4 text-sm text-zinc-600" colSpan={11}>
                           Aucune écriture ouverte.
                         </td>
                       </tr>
@@ -349,6 +365,19 @@ export default function DriversDebtsPage() {
                             {formatAriary(it.remaining_amount_ariary)} Ar
                           </td>
                           <td className="px-3 py-2">{paymentStatusLabel(it.payment_status)}</td>
+                          <td className="px-3 py-2">
+                            {(() => {
+                              const ageDays = daysSince(it.entry_date);
+                              if (ageDays == null) return <span className="text-zinc-500">—</span>;
+                              const tone =
+                                ageDays > 7
+                                  ? 'text-red-800'
+                                  : ageDays > 3
+                                    ? 'text-amber-800'
+                                    : 'text-zinc-700';
+                              return <span className={`tabular-nums font-medium ${tone}`}>{ageDays} j</span>;
+                            })()}
+                          </td>
                           <td className="px-3 py-2 text-xs text-zinc-600">
                             <div className="tabular-nums">
                               {fmtDate(it.assignment_starts_at)} → {fmtDate(it.assignment_ends_at)}
