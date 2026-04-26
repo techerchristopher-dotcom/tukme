@@ -991,6 +991,39 @@ export default function FleetVehicleDetailPage() {
       setEntryError(res.error.message);
       return;
     }
+    const entryId = res.data?.entry_id ?? null;
+
+    // Optional immediate payment for payable income categories (carburant/loyer).
+    const categoryNorm = entryForm.category.trim().toLowerCase();
+    const isPayableIncome = entryForm.entry_type === 'income' && (categoryNorm === 'carburant' || categoryNorm === 'loyer');
+    if (isPayableIncome) {
+      const paymentDigits = digitsOnly(entryImmediatePaymentAmountText);
+      const paymentAmount = paymentDigits ? Number.parseInt(paymentDigits, 10) : null;
+      const shouldCreatePayment = !!paymentDigits;
+      if (shouldCreatePayment) {
+        if (paymentAmount == null || !Number.isInteger(paymentAmount) || paymentAmount <= 0) {
+          setEntryError('Paiement reçu invalide (entier > 0).');
+          return;
+        }
+        // Guardrail: forbid overpayment against the due amount.
+        if (paymentAmount > amount) {
+          setEntryError('Paiement reçu ne peut pas dépasser le montant dû.');
+          return;
+        }
+        if (entryId) {
+          const payRes = await createFleetVehicleEntryPayment(data.vehicle.id, entryId, {
+            amount_ariary: paymentAmount,
+            paid_at: entryForm.entry_date,
+            notes: entryImmediatePaymentNotes.trim() ? entryImmediatePaymentNotes.trim() : null,
+          });
+          if (payRes.error) {
+            setEntryPaymentPostError(
+              'Paiement non enregistré. L’écriture a bien été créée — vous pouvez compléter via le détail.'
+            );
+          }
+        }
+      }
+    }
     setEntryOpen(false);
     setRefreshSeq((s) => s + 1);
   }
@@ -1173,14 +1206,16 @@ export default function FleetVehicleDetailPage() {
   const editIsFuelIncome =
     editIsFuelStructured && ((entryEditForm?.entry_type ?? selectedEntry?.entry_type) === 'income');
 
-  const isFuelIncomeDebt =
-    selectedEntry?.category?.trim().toLowerCase() === 'carburant' && selectedEntry?.entry_type === 'income';
+  const isPayableIncomeDebt =
+    selectedEntry?.entry_type === 'income' &&
+    (selectedEntry?.category?.trim().toLowerCase() === 'carburant' ||
+      selectedEntry?.category?.trim().toLowerCase() === 'loyer');
 
   useEffect(() => {
     let cancelled = false;
     async function run() {
       if (!detailOpen || detailMode !== 'read' || !data || !selectedEntry) return;
-      if (!isFuelIncomeDebt) return;
+      if (!isPayableIncomeDebt) return;
       setPaymentsLoading(true);
       setPaymentsError(null);
       const res = await listFleetVehicleEntryPayments(data.vehicle.id, selectedEntry.id);
@@ -1208,7 +1243,7 @@ export default function FleetVehicleDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [detailOpen, detailMode, data, selectedEntry, isFuelIncomeDebt]);
+  }, [detailOpen, detailMode, data, selectedEntry, isPayableIncomeDebt]);
 
   // Après re-fetch véhicule (`refreshSeq`), réaligner l’écriture ouverte avec l’entrée enrichie serveur
   // (total payé, reste, statut) — évite état stale sur la carte « Paiement chauffeur » et la validation du 2e paiement.
@@ -1222,7 +1257,7 @@ export default function FleetVehicleDetailPage() {
   async function submitNewPayment(e: FormEvent) {
     e.preventDefault();
     if (!data || !selectedEntry) return;
-    if (!isFuelIncomeDebt) return;
+    if (!isPayableIncomeDebt) return;
     setPaymentsError(null);
 
     const due = selectedEntry.amount_ariary;
@@ -1755,6 +1790,7 @@ export default function FleetVehicleDetailPage() {
                         <thead>
                           <tr className="text-left text-xs text-zinc-600">
                             <th className="border-b border-zinc-200 px-2 py-2">Date</th>
+                            <th className="border-b border-zinc-200 px-2 py-2">Catégorie</th>
                             <th className="border-b border-zinc-200 px-2 py-2">Libellé</th>
                             <th className="border-b border-zinc-200 px-2 py-2">Dû (Ar)</th>
                             <th className="border-b border-zinc-200 px-2 py-2">Payé (Ar)</th>
@@ -1777,6 +1813,7 @@ export default function FleetVehicleDetailPage() {
                               }}
                             >
                               <td className="border-b border-zinc-100 px-2 py-2">{it.entry_date}</td>
+                              <td className="border-b border-zinc-100 px-2 py-2">{it.category}</td>
                               <td className="border-b border-zinc-100 px-2 py-2">{it.description}</td>
                               <td className="border-b border-zinc-100 px-2 py-2 tabular-nums font-medium">
                                 {formatAriary(it.amount_ariary)}
@@ -1868,7 +1905,10 @@ export default function FleetVehicleDetailPage() {
                           >
                             {e.entry_type}
                           </span>
-                          {String(e.category ?? '').trim().toLowerCase() === 'carburant' && e.entry_type === 'income' && e.payment_status ? (
+                          {e.entry_type === 'income' &&
+                          (String(e.category ?? '').trim().toLowerCase() === 'carburant' ||
+                            String(e.category ?? '').trim().toLowerCase() === 'loyer') &&
+                          e.payment_status ? (
                             <span
                               className={
                                 'ml-2 inline-block rounded-full border px-2 py-0.5 text-xs ' +
@@ -2228,7 +2268,9 @@ export default function FleetVehicleDetailPage() {
                     ) : null}
 
                     {/* Fuel + income: immediate payment entry (optional) */}
-                    {entryForm.entry_type === 'income' && entryForm.category === 'carburant' ? (
+                    {entryForm.entry_type === 'income' &&
+                    (entryForm.category.trim().toLowerCase() === 'carburant' ||
+                      entryForm.category.trim().toLowerCase() === 'loyer') ? (
                       <div className="sm:col-span-2 rounded-xl border border-zinc-200 bg-white p-4">
                         <div className="text-sm font-semibold text-zinc-900">Paiement reçu maintenant</div>
                         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -2245,24 +2287,33 @@ export default function FleetVehicleDetailPage() {
                             />
                           </label>
                           <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-sm">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="text-xs text-zinc-600">Montant dû</div>
-                              <div className="font-semibold tabular-nums text-zinc-900">
-                                {fuelDueAriary == null ? '—' : `${formatAriary(fuelDueAriary)} Ar`}
-                              </div>
-                            </div>
-                            <div className="mt-2 flex items-center justify-between gap-3">
-                              <div className="text-xs text-zinc-600">Reste à payer</div>
-                              <div className="font-semibold tabular-nums text-zinc-900">
-                                {fuelDueAriary == null
-                                  ? '—'
-                                  : (() => {
-                                      const due = fuelDueAriary;
-                                      const paid = Number.parseInt(digitsOnly(entryImmediatePaymentAmountText), 10) || 0;
-                                      return `${formatAriary(Math.max(0, due - paid))} Ar`;
-                                    })()}
-                              </div>
-                            </div>
+                            {(() => {
+                              const categoryNorm = entryForm.category.trim().toLowerCase();
+                              const isFuel = categoryNorm === 'carburant';
+                              const due =
+                                isFuel
+                                  ? fuelDueAriary
+                                  : Number.parseInt(digitsOnly(entryAmountText || String(entryForm.amount_ariary || '')), 10) ||
+                                    0;
+                              const dueOk = typeof due === 'number' && Number.isFinite(due) && due > 0;
+                              const paid = Number.parseInt(digitsOnly(entryImmediatePaymentAmountText), 10) || 0;
+                              return (
+                                <>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <div className="text-xs text-zinc-600">Montant dû</div>
+                                    <div className="font-semibold tabular-nums text-zinc-900">
+                                      {!dueOk ? '—' : `${formatAriary(due)} Ar`}
+                                    </div>
+                                  </div>
+                                  <div className="mt-2 flex items-center justify-between gap-3">
+                                    <div className="text-xs text-zinc-600">Reste à payer</div>
+                                    <div className="font-semibold tabular-nums text-zinc-900">
+                                      {!dueOk ? '—' : `${formatAriary(Math.max(0, due - paid))} Ar`}
+                                    </div>
+                                  </div>
+                                </>
+                              );
+                            })()}
                           </div>
                           <label className="flex flex-col gap-1 text-sm sm:col-span-2">
                             <span className="text-zinc-700">Note (optionnel)</span>
@@ -2809,14 +2860,15 @@ export default function FleetVehicleDetailPage() {
                         <div className="text-xs text-zinc-600">Montant (Ar)</div>
                         <div className="mt-1 font-semibold tabular-nums">{formatAriary(selectedEntry.amount_ariary)} Ar</div>
                       </div>
-                      {selectedEntry.category?.trim().toLowerCase() === 'carburant' &&
-                      selectedEntry.entry_type === 'income' ? (
+                  {selectedEntry.entry_type === 'income' &&
+                  (selectedEntry.category?.trim().toLowerCase() === 'carburant' ||
+                    selectedEntry.category?.trim().toLowerCase() === 'loyer') ? (
                         <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3">
                           <div className="flex items-start justify-between gap-3">
                             <div>
                               <div className="text-xs font-medium text-indigo-900">Paiement chauffeur</div>
                               <div className="mt-1 text-xs text-indigo-800">
-                                Suivi d’une dette issue de l’écriture carburant (income).
+                                Suivi d’une dette issue d’une écriture income (carburant/loyer).
                               </div>
                             </div>
                             {selectedEntry.payment_status ? (

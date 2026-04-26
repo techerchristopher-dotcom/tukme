@@ -388,6 +388,7 @@ export type FleetEntryPaymentRow = {
 export type FleetVehicleOpenFuelIncomeDebtItem = {
   entry_id: string;
   entry_date: string;
+  category: string;
   description: string;
   amount_ariary: number;
   total_paid_ariary: number;

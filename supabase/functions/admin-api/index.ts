@@ -1222,11 +1222,12 @@ async function handleFleetVehicleGet(req: Request, url: URL, vehicleIdRaw: strin
       const id = String(row?.id ?? '');
       const due = typeof row?.amount_ariary === 'number' ? row.amount_ariary : Number(row?.amount_ariary ?? 0);
       const paid = paymentAggByEntryId.get(id) ?? 0;
-      const isFuelIncomeDebt =
-        String(row?.entry_type ?? '').trim().toLowerCase() === 'income' &&
-        String(row?.category ?? '').trim().toLowerCase() === 'carburant';
+      const entryTypeNorm = String(row?.entry_type ?? '').trim().toLowerCase();
+      const categoryNorm = String(row?.category ?? '').trim().toLowerCase();
+      const isPayableIncomeDebt =
+        entryTypeNorm === 'income' && (categoryNorm === 'carburant' || categoryNorm === 'loyer');
 
-      if (!isFuelIncomeDebt || !Number.isFinite(due) || due <= 0) {
+      if (!isPayableIncomeDebt || !Number.isFinite(due) || due <= 0) {
         return {
           ...row,
           total_paid_ariary: null,
@@ -2510,11 +2511,12 @@ async function handleFleetVehicleEntryPaymentsCreate(
   const categoryNorm = String((entry as any).category ?? '').trim().toLowerCase();
   const entryTypeNorm = String((entry as any).entry_type ?? '').trim().toLowerCase();
 
-  // Rule: payments only allowed for fuel income debts (carburant + income).
-  if (!(categoryNorm === 'carburant' && entryTypeNorm === 'income')) {
+  // Rule: partial payments allowed for payable income debts.
+  // Currently supported categories: carburant, loyer.
+  if (!(entryTypeNorm === 'income' && (categoryNorm === 'carburant' || categoryNorm === 'loyer'))) {
     return jsonResponse(400, {
       data: null,
-      error: { message: 'Payments are only allowed for carburant + income entries.' },
+      error: { message: 'Payments are only allowed for income entries (carburant/loyer).' },
     });
   }
 
@@ -2609,10 +2611,10 @@ async function handleFleetVehicleEntryPaymentsList(
   const entry = await requireFleetVehicleEntryExists({ adminClient, vehicleId, entryId, allowDeleted: false });
   const categoryNorm = String((entry as any).category ?? '').trim().toLowerCase();
   const entryTypeNorm = String((entry as any).entry_type ?? '').trim().toLowerCase();
-  if (!(categoryNorm === 'carburant' && entryTypeNorm === 'income')) {
+  if (!(entryTypeNorm === 'income' && (categoryNorm === 'carburant' || categoryNorm === 'loyer'))) {
     return jsonResponse(400, {
       data: null,
-      error: { message: 'Payments are only available for carburant + income entries.' },
+      error: { message: 'Payments are only available for income entries (carburant/loyer).' },
     });
   }
 
@@ -2716,6 +2718,7 @@ async function handleFleetVehicleFinancialSummary(req: Request, _url: URL, vehic
 type OpenFuelIncomeDebtItem = {
   entry_id: string;
   entry_date: string;
+  category: string;
   description: string;
   amount_ariary: number;
   total_paid_ariary: number;
@@ -2764,6 +2767,7 @@ async function handleFleetVehicleOpenFuelIncomeDebts(req: Request, vehicleIdRaw:
     items.push({
       entry_id: String(r?.entry_id ?? ''),
       entry_date: String(r?.entry_date ?? ''),
+      category: String(r?.category ?? ''),
       description: String(r?.description ?? ''),
       amount_ariary: dueInt,
       total_paid_ariary: paidInt,
