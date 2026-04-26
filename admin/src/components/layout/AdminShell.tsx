@@ -7,6 +7,7 @@ import { getSupabaseBrowser } from '@/lib/supabaseBrowserClient';
 const nav = [
   { href: '/dashboard', label: 'Dashboard' },
   { href: '/drivers', label: 'Chauffeurs' },
+  { href: '/drivers/debts', label: 'Dettes chauffeurs' },
   { href: '/rides', label: 'Courses' },
   { href: '/payouts', label: 'Payouts' },
   { href: '/rents', label: 'Locations' },

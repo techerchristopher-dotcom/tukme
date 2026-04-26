@@ -11,6 +11,8 @@ import type {
   DeactivateDriverResponse,
   DailyRentRow,
   DriverAccountListFilter,
+  DriverDebtDetailResponse,
+  DriverDebtsSummaryResponse,
   DriverDailySummaryRow,
   DriverDetailResponse,
   FleetAssignmentCreateInput,
@@ -20,6 +22,7 @@ import type {
   FleetVehiclePatchInput,
   FleetEntryCreateInput,
   FleetEntryPatchInput,
+  FleetEntryRow,
   FleetVehicleOpenFuelIncomeDebtsResponse,
   FleetEntryPaymentRow,
   Paginated,
@@ -538,6 +541,18 @@ export async function getDriverDetail(params: {
   return fetchAdmin(`/drivers/${encodeURIComponent(id)}/detail${query}`);
 }
 
+export async function getDriverDebtsSummary(): Promise<ApiResult<DriverDebtsSummaryResponse>> {
+  return fetchAdmin('/drivers/debts');
+}
+
+export async function getDriverDebtsDetail(driverId: string): Promise<ApiResult<DriverDebtDetailResponse>> {
+  const id = driverId.trim();
+  if (!isUuidString(id)) {
+    return { data: null, error: { message: 'Identifiant chauffeur invalide' } };
+  }
+  return fetchAdmin(`/drivers/${encodeURIComponent(id)}/debts`);
+}
+
 export async function retireDriverCurrentVehicle(driverId: string): Promise<ApiResult<{ ok: boolean }>> {
   const id = driverId.trim();
   if (!isUuidString(id)) {
@@ -805,6 +820,23 @@ export async function patchFleetVehicleEntry(
     method: 'PATCH',
     body: patch as Record<string, unknown>,
   });
+}
+
+export async function getFleetVehicleEntry(
+  vehicleId: string,
+  entryId: string
+): Promise<ApiResult<{ entry: FleetEntryRow }>> {
+  const vid = vehicleId.trim();
+  if (!isUuidString(vid)) {
+    return { data: null, error: { message: 'Identifiant véhicule invalide' } };
+  }
+  const eid = entryId.trim();
+  if (!isUuidString(eid)) {
+    return { data: null, error: { message: 'Identifiant écriture invalide' } };
+  }
+  return fetchAdmin<{ entry: FleetEntryRow }>(
+    `/fleet/vehicles/${encodeURIComponent(vid)}/entries/${encodeURIComponent(eid)}`
+  );
 }
 
 export async function softDeleteFleetVehicleEntry(

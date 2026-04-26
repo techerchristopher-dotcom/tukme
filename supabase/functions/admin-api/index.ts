@@ -687,6 +687,30 @@ async function handleDriverDetail(req: Request, url: URL, driverIdRaw: string) {
   });
 }
 
+async function handleDriversDebtsSummary(req: Request): Promise<Response> {
+  const { adminClient } = await requireAdmin(req);
+  const { data, error } = await adminClient.rpc('admin_driver_debts_summary');
+  if (error) {
+    console.error('[admin-api] admin_driver_debts_summary rpc error', { message: error.message });
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  return jsonResponse(200, { data: { items: data ?? [] }, error: null });
+}
+
+async function handleDriverDebtsDetail(req: Request, driverIdRaw: string): Promise<Response> {
+  const driverId = normalizePathId(driverIdRaw);
+  if (!isUuid(driverId)) {
+    return jsonResponse(400, { data: null, error: { message: 'Invalid driverId' } });
+  }
+  const { adminClient } = await requireAdmin(req);
+  const { data, error } = await adminClient.rpc('admin_driver_debts_detail', { p_driver_id: driverId });
+  if (error) {
+    console.error('[admin-api] admin_driver_debts_detail rpc error', { driverId, message: error.message });
+    return jsonResponse(500, { data: null, error: { message: 'Internal error' } });
+  }
+  return jsonResponse(200, { data: { driver_id: driverId, items: data ?? [] }, error: null });
+}
+
 async function handleRetireCurrentVehicle(req: Request, driverIdRaw: string): Promise<Response> {
   const driverId = normalizePathId(driverIdRaw);
   if (!isUuid(driverId)) {
@@ -1962,6 +1986,17 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
       : requireBodyString(body, 'label');
   const notes = asNonEmptyString(body.notes);
 
+  // Phase 2 (driver debt refactor): resolve the active *ops* assignment by business date.
+  // This is additive-only: we populate nullable columns when possible, without changing existing logic.
+  const resolution = await resolveActiveVehicleAssignment(vehicleId, entryDate, adminClient);
+  console.log('[admin-api] fleet(manual) entry create assignment resolution', {
+    vehicle_id: vehicleId,
+    entry_date: entryDate,
+    resolution_status: resolution.assignment_resolution_status,
+    assignment_id: resolution.driver_vehicle_assignment_id,
+    driver_id: resolution.driver_id_snapshot,
+  });
+
   const { data, error } = await adminClient
     .from('fleet_vehicle_entries')
     .insert({
@@ -1974,6 +2009,12 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
       label,
       entry_date: entryDate,
       notes: notes ?? null,
+
+      // New nullable linkage fields (Phase 2): do not affect current debt logic.
+      driver_vehicle_assignment_id: resolution.driver_vehicle_assignment_id,
+      driver_id_snapshot: resolution.driver_id_snapshot,
+      assignment_resolution_status: resolution.assignment_resolution_status,
+      assignment_resolution_note: resolution.assignment_resolution_note,
 
       // Fuel snapshot fields (nullable for non-fuel entries)
       fuel_km_start: fuelKmStart,
@@ -1994,6 +2035,83 @@ async function handleFleetVehicleEntriesCreate(req: Request, vehicleIdRaw: strin
     return jsonResponse(400, { data: null, error: { message: error.message } });
   }
   return jsonResponse(200, { data: { entry_id: data?.id ?? null }, error: null });
+}
+
+async function resolveActiveVehicleAssignment(
+  fleetVehicleId: string,
+  entryDateYmd: string,
+  adminClient: ReturnType<typeof createClient>
+): Promise<{
+  driver_vehicle_assignment_id: string | null;
+  driver_id_snapshot: string | null;
+  assignment_resolution_status: 'resolved' | 'unassigned' | 'ambiguous';
+  assignment_resolution_note:
+    | 'resolved_on_create_fleet_assignment'
+    | 'no_active_fleet_assignment_on_entry_date'
+    | 'multiple_active_fleet_assignments_on_entry_date';
+}> {
+  // We must use entry_date (business date), not created_at.
+  // Phase 2.1 corrective: resolve directly via public.fleet_vehicle_assignments (fleet world source of truth).
+
+  const entryDate = typeof entryDateYmd === 'string' && entryDateYmd.trim() ? entryDateYmd.trim() : null;
+  if (!entryDate || !/^\d{4}-\d{2}-\d{2}$/.test(entryDate)) {
+    // Fallback: treat as unassigned (we do not guess on invalid date input).
+    return {
+      driver_vehicle_assignment_id: null,
+      driver_id_snapshot: null,
+      assignment_resolution_status: 'unassigned',
+      assignment_resolution_note: 'no_active_fleet_assignment_on_entry_date',
+    };
+  }
+
+  // Resolve the active fleet_vehicle_assignments row for this fleet vehicle on entry_date.
+  // Use a date-window predicate (same semantics as [starts_at, ends_at) on business date).
+  const { data: assigns, error: aErr } = await adminClient
+    .from('fleet_vehicle_assignments')
+    .select('id, driver_id, starts_at, ends_at')
+    .eq('vehicle_id', fleetVehicleId)
+    .lte('starts_at', `${entryDate}T23:59:59.999Z`)
+    .or(`ends_at.is.null,ends_at.gte.${entryDate}T00:00:00.000Z`)
+    .order('starts_at', { ascending: false })
+    .limit(2);
+
+  if (aErr) {
+    console.error('[admin-api] resolve assignment: fleet_vehicle_assignments', aErr.message);
+    return {
+      driver_vehicle_assignment_id: null,
+      driver_id_snapshot: null,
+      assignment_resolution_status: 'unassigned',
+      assignment_resolution_note: 'no_active_fleet_assignment_on_entry_date',
+    };
+  }
+
+  const rows = assigns ?? [];
+  if (rows.length === 1) {
+    const assignmentId = String((rows[0] as any).id ?? '');
+    const driverId = String((rows[0] as any).driver_id ?? '');
+    return {
+      driver_vehicle_assignment_id: isUuid(assignmentId) ? assignmentId : null,
+      driver_id_snapshot: isUuid(driverId) ? driverId : null,
+      assignment_resolution_status: 'resolved',
+      assignment_resolution_note: 'resolved_on_create_fleet_assignment',
+    };
+  }
+
+  if (rows.length <= 0) {
+    return {
+      driver_vehicle_assignment_id: null,
+      driver_id_snapshot: null,
+      assignment_resolution_status: 'unassigned',
+      assignment_resolution_note: 'no_active_fleet_assignment_on_entry_date',
+    };
+  }
+
+  return {
+    driver_vehicle_assignment_id: null,
+    driver_id_snapshot: null,
+    assignment_resolution_status: 'ambiguous',
+    assignment_resolution_note: 'multiple_active_fleet_assignments_on_entry_date',
+  };
 }
 
 async function requireFleetVehicleEntryExists(args: {
@@ -2022,6 +2140,99 @@ async function requireFleetVehicleEntryExists(args: {
     throw Object.assign(new Error('Entry not found'), { status: 404 });
   }
   return data as unknown as Record<string, unknown>;
+}
+
+async function handleFleetVehicleEntryGet(
+  req: Request,
+  vehicleIdRaw: string,
+  entryIdRaw: string
+): Promise<Response> {
+  const vehicleId = normalizePathId(vehicleIdRaw);
+  const entryId = normalizePathId(entryIdRaw);
+  if (!isUuid(vehicleId)) return jsonResponse(400, { data: null, error: { message: 'Invalid vehicleId' } });
+  if (!isUuid(entryId)) return jsonResponse(400, { data: null, error: { message: 'Invalid entryId' } });
+
+  const { adminClient } = await requireAdmin(req);
+  await requireFleetVehicleExists(adminClient, vehicleId);
+
+  console.log('[admin-api] fleet(manual) entry get request', { vehicleId, entryId });
+
+  let row: Record<string, unknown>;
+  try {
+    row = (await requireFleetVehicleEntryExists({ adminClient, vehicleId, entryId })) as Record<string, unknown>;
+  } catch (e) {
+    const status =
+      e !== null && typeof e === 'object' && 'status' in e && typeof (e as any).status === 'number'
+        ? (e as any).status
+        : null;
+    if (status === 404) {
+      // Diagnostics helper: is the entry id valid but attached to a different vehicle?
+      const { data: byId, error: byIdErr } = await adminClient
+        .from('fleet_vehicle_entries')
+        .select('id, vehicle_id, deleted_at')
+        .eq('id', entryId)
+        .maybeSingle();
+      if (byIdErr) {
+        console.error('[admin-api] fleet(manual) entry get diagnostics error', byIdErr.message);
+      } else if (byId?.id) {
+        console.warn('[admin-api] fleet(manual) entry get not found (vehicle mismatch or deleted?)', {
+          requested_vehicle_id: vehicleId,
+          actual_vehicle_id: String((byId as any).vehicle_id ?? null),
+          deleted_at: (byId as any).deleted_at ?? null,
+        });
+      } else {
+        console.warn('[admin-api] fleet(manual) entry get not found (missing id)', { entryId });
+      }
+    }
+    throw e;
+  }
+
+  const dueRaw = (row as any).amount_ariary;
+  const due = typeof dueRaw === 'number' ? dueRaw : Number(dueRaw ?? 0);
+  const entryTypeNorm = String((row as any).entry_type ?? '').trim().toLowerCase();
+  const categoryNorm = String((row as any).category ?? '').trim().toLowerCase();
+  const isPayableIncomeDebt = entryTypeNorm === 'income' && (categoryNorm === 'carburant' || categoryNorm === 'loyer');
+
+  if (!isPayableIncomeDebt || !Number.isFinite(due) || due <= 0) {
+    return jsonResponse(200, {
+      data: {
+        entry: {
+          ...row,
+          total_paid_ariary: null,
+          remaining_amount_ariary: null,
+          payment_status: null,
+        },
+      },
+      error: null,
+    });
+  }
+
+  let totalPaid = 0;
+  const { data: payAgg, error: payAggErr } = await adminClient.rpc('admin_fleet_entry_payments_aggregates', {
+    p_entry_ids: [entryId],
+  });
+  if (payAggErr) {
+    console.error('[admin-api] fleet(manual) entry get payments aggregates error', payAggErr.message);
+  } else {
+    const first = Array.isArray(payAgg) ? (payAgg[0] as any) : (payAgg as any);
+    const v =
+      typeof first?.total_paid_ariary === 'number' ? first.total_paid_ariary : Number(first?.total_paid_ariary ?? 0);
+    totalPaid = Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : 0;
+  }
+
+  const remaining = Math.trunc(due) - totalPaid;
+  const status = totalPaid <= 0 ? 'unpaid' : totalPaid < Math.trunc(due) ? 'partial' : 'paid';
+  return jsonResponse(200, {
+    data: {
+      entry: {
+        ...row,
+        total_paid_ariary: totalPaid,
+        remaining_amount_ariary: remaining,
+        payment_status: status,
+      },
+    },
+    error: null,
+  });
 }
 
 async function handleFleetVehicleEntryPatch(
@@ -3182,6 +3393,13 @@ Deno.serve(async (req) => {
 
     if (scope === 'drivers') {
       if (rest[0] === 'daily-summary') return await handleDriversDailySummary(req, url);
+      if (rest.length === 1 && rest[0] === 'debts' && req.method === 'GET') {
+        return await handleDriversDebtsSummary(req);
+      }
+      if (rest.length === 2 && rest[1] === 'debts' && req.method === 'GET') {
+        const driverId = normalizePathId(rest[0] ?? '');
+        return await handleDriverDebtsDetail(req, driverId);
+      }
       if (rest.length >= 2 && rest[1] === 'detail') {
         const driverId = normalizePathId(rest[0] ?? '');
         return await handleDriverDetail(req, url, driverId);
@@ -3241,6 +3459,10 @@ Deno.serve(async (req) => {
         if (rest.length === 2 && req.method === 'PATCH') return await handleFleetVehiclePatch(req, vehicleId);
         if (rest.length === 3 && rest[2] === 'open-fuel-income-debts' && req.method === 'GET') {
           return await handleFleetVehicleOpenFuelIncomeDebts(req, vehicleId);
+        }
+        if (rest.length === 4 && rest[2] === 'entries' && req.method === 'GET') {
+          const entryId = normalizePathId(rest[3] ?? '');
+          return await handleFleetVehicleEntryGet(req, vehicleId, entryId);
         }
         if (rest.length === 4 && rest[2] === 'entries' && req.method === 'PATCH') {
           const entryId = normalizePathId(rest[3] ?? '');

@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 
 import { AdminShell } from '@/components/layout/AdminShell';
@@ -10,6 +10,7 @@ import {
   createFleetVehicleEntry,
   getDriversDailySummary,
   getFleetVehicle,
+  getFleetVehicleEntry,
   getFleetVehicleOpenFuelIncomeDebts,
   listFleetVehicleEntryPayments,
   patchFleetVehicleEntry,
@@ -340,6 +341,8 @@ export default function FleetVehicleDetailPage() {
   const { businessDate } = useBusinessDate();
 
   const vehicleId = useMemo(() => normalizeUuidParam(params?.vehicleId), [params?.vehicleId]);
+  const searchParams = useSearchParams();
+  const deepLinkEntryId = (searchParams.get('entryId') ?? '').trim();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1080,6 +1083,8 @@ export default function FleetVehicleDetailPage() {
   const recentEntries = data?.recent_entries ?? [];
   const activeAssignment = data?.active_assignment ?? null;
 
+  const [deepLinkHandledEntryId, setDeepLinkHandledEntryId] = useState<string | null>(null);
+
   function openEntryDetail(e: FleetEntryRow) {
     setSelectedEntry(e);
     setDetailError(null);
@@ -1102,6 +1107,49 @@ export default function FleetVehicleDetailPage() {
     setDetailOpen(true);
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      if (!data?.vehicle?.id) return;
+      if (!deepLinkEntryId) return;
+      if (!isUuidString(deepLinkEntryId)) return;
+      if (deepLinkHandledEntryId === deepLinkEntryId) return;
+      // Avoid opening while another modal is already active.
+      if (editOpen || entryOpen || assignOpen || detailOpen || debtOpen) return;
+
+      setDeepLinkHandledEntryId(deepLinkEntryId);
+
+      // Prefer recent entries (already enriched), otherwise fetch the entry by id.
+      const fromRecent = recentEntries.find((e) => e.id === deepLinkEntryId) ?? null;
+      if (fromRecent) {
+        openEntryDetail(fromRecent);
+        return;
+      }
+
+      const res = await getFleetVehicleEntry(data.vehicle.id, deepLinkEntryId);
+      if (cancelled) return;
+      if (res.error || !res.data?.entry?.id) {
+        setError(res.error?.message ?? "Impossible d’ouvrir l’écriture demandée.");
+        return;
+      }
+      openEntryDetail(res.data.entry);
+    }
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    data?.vehicle?.id,
+    deepLinkEntryId,
+    deepLinkHandledEntryId,
+    recentEntries,
+    editOpen,
+    entryOpen,
+    assignOpen,
+    detailOpen,
+    debtOpen,
+  ]);
+
   function openDebtEntryDetail(item: FleetVehicleOpenFuelIncomeDebtItem) {
     const id = String(item.entry_id ?? '').trim();
     if (!id) {
@@ -1109,16 +1157,24 @@ export default function FleetVehicleDetailPage() {
       return;
     }
     const entry = recentEntries.find((e) => e.id === id) ?? null;
-    if (!entry) {
-      setDebtError(
-        "Cette dette n’est pas dans la liste des écritures récentes. " +
-          "Rafraîchissez la page ou ouvrez l’écriture depuis le journal si elle est visible."
-      );
+    if (entry) {
+      setDebtOpen(false);
+      setDebtError(null);
+      openEntryDetail(entry);
       return;
     }
-    setDebtOpen(false);
-    setDebtError(null);
-    openEntryDetail(entry);
+    // Fallback: fetch entry by id (so older debts still open the same modal).
+    void (async () => {
+      if (!data?.vehicle?.id) return;
+      const res = await getFleetVehicleEntry(data.vehicle.id, id);
+      if (res.error || !res.data?.entry?.id) {
+        setDebtError(res.error?.message ?? "Impossible d’ouvrir l’écriture demandée.");
+        return;
+      }
+      setDebtOpen(false);
+      setDebtError(null);
+      openEntryDetail(res.data.entry);
+    })();
   }
 
   function beginEditEntry() {

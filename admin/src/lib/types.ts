@@ -169,6 +169,52 @@ export type CurrentVehicle = {
 };
 
 // ---------------------------------------------------------------------------
+// Driver debts (fleet manual)
+// ---------------------------------------------------------------------------
+export type DriverDebtSummaryItem = {
+  driver_id: string;
+  driver_name: string | null;
+  driver_phone: string | null;
+  open_entries_count: number;
+  total_debt_ariary: number;
+  fuel_debt_ariary: number;
+  rent_debt_ariary: number;
+  last_payment_at: string | null;
+  current_vehicle_id: string | null;
+  current_vehicle_label: string | null;
+  current_assignment_id: string | null;
+};
+
+export type DriverDebtsSummaryResponse = {
+  items: DriverDebtSummaryItem[];
+};
+
+export type DriverDebtDetailItem = {
+  entry_id: string;
+  driver_id: string;
+  vehicle_id: string;
+  vehicle_label: string | null;
+  assignment_id: string | null;
+  assignment_starts_at: string | null;
+  assignment_ends_at: string | null;
+  entry_date: string; // YYYY-MM-DD
+  category: string;
+  label: string | null;
+  amount_ariary: number;
+  total_paid_ariary: number;
+  remaining_amount_ariary: number;
+  payment_status: 'non payé' | 'partiel';
+  last_payment_at: string | null;
+  assignment_resolution_status: string | null;
+  assignment_resolution_note: string | null;
+};
+
+export type DriverDebtDetailResponse = {
+  driver_id: string;
+  items: DriverDebtDetailItem[];
+};
+
+// ---------------------------------------------------------------------------
 // Fleet manual module (Suivi du parc)
 // ---------------------------------------------------------------------------
 export type FleetVehicleStatus = 'active' | 'inactive' | 'sold' | 'retired';
