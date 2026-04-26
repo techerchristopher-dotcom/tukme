@@ -11,12 +11,14 @@ import {
   createDriverPayout,
   deactivateDriver,
   getDriverDetail,
+  getDriverDebtsDetail,
   reactivateDriver,
   retireDriverCurrentVehicle,
   setDriverCurrentVehicle,
 } from '@/lib/adminApi';
+import { FleetEntryPaymentModal } from '@/components/fleet/FleetEntryPaymentModal';
 import { formatAriary } from '@/lib/money';
-import type { CreateDriverPayoutInput, DriverDetailResponse } from '@/lib/types';
+import type { CreateDriverPayoutInput, DriverDebtDetailItem, DriverDetailResponse } from '@/lib/types';
 import { isUuidString, normalizeUuidParam } from '@/lib/uuid';
 
 function formatPhone(v: string | null | undefined): string {
@@ -37,6 +39,14 @@ export default function DriverDetailPage() {
   const [data, setData] = useState<DriverDetailResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshSeq, setRefreshSeq] = useState(0);
+
+  const [debtsLoading, setDebtsLoading] = useState(false);
+  const [debtsError, setDebtsError] = useState<string | null>(null);
+  const [debts, setDebts] = useState<DriverDebtDetailItem[]>([]);
+
+  const [payOpen, setPayOpen] = useState(false);
+  const [payVehicleId, setPayVehicleId] = useState<string | null>(null);
+  const [payEntryId, setPayEntryId] = useState<string | null>(null);
 
   const [payoutAmount, setPayoutAmount] = useState<string>('');
   const [payoutMethod, setPayoutMethod] = useState<CreateDriverPayoutInput['method']>('cash');
@@ -99,6 +109,28 @@ export default function DriverDetailPage() {
   }, [driverId, businessDate, refreshSeq]);
 
   useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      if (!driverId || !isUuidString(driverId)) return;
+      setDebtsLoading(true);
+      setDebtsError(null);
+      const res = await getDriverDebtsDetail(driverId);
+      if (cancelled) return;
+      if (res.error) {
+        setDebtsError(res.error.message);
+        setDebts([]);
+      } else {
+        setDebts(res.data.items ?? []);
+      }
+      setDebtsLoading(false);
+    }
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [driverId, refreshSeq]);
+
+  useEffect(() => {
     if (!deleteOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !deleteSubmitting) setDeleteOpen(false);
@@ -141,6 +173,28 @@ export default function DriverDetailPage() {
   const displayPhone = formatPhone(
     profilePhone?.trim() ? profilePhone : todayPhone ?? null
   );
+
+  const sortedDebts = useMemo(() => {
+    return [...debts].sort((a, b) => (b.remaining_amount_ariary ?? 0) - (a.remaining_amount_ariary ?? 0));
+  }, [debts]);
+
+  function daysSince(dateYmd: string | null | undefined): number | null {
+    if (!dateYmd || !String(dateYmd).trim()) return null;
+    const s = String(dateYmd).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) return null;
+    const a = new Date(`${businessDate}T00:00:00.000Z`);
+    const b = new Date(`${s}T00:00:00.000Z`);
+    const ms = a.getTime() - b.getTime();
+    if (!Number.isFinite(ms)) return null;
+    return Math.max(0, Math.floor(ms / 86_400_000));
+  }
+
+  function openPayment(it: DriverDebtDetailItem) {
+    setPayVehicleId(it.vehicle_id);
+    setPayEntryId(it.entry_id);
+    setPayOpen(true);
+  }
 
   async function submitPayout() {
     setPayoutOk(null);
@@ -421,6 +475,90 @@ export default function DriverDetailPage() {
             </div>
 
             <div className="mt-6 space-y-6">
+              <section className="rounded-xl border border-zinc-200 bg-white p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h2 className="text-sm font-semibold text-zinc-900">Dettes (carburant / loyer)</h2>
+                    <div className="mt-1 text-xs text-zinc-600">
+                      Triées par <strong>reste</strong> décroissant.
+                    </div>
+                  </div>
+                </div>
+
+                {debtsError ? (
+                  <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+                    {debtsError}
+                  </div>
+                ) : null}
+
+                <div className="mt-3 overflow-x-auto">
+                  <table className="min-w-full border-separate border-spacing-0 text-sm">
+                    <thead>
+                      <tr className="text-left text-xs text-zinc-600">
+                        <th className="border-b border-zinc-200 px-2 py-2">Date</th>
+                        <th className="border-b border-zinc-200 px-2 py-2">Véhicule</th>
+                        <th className="border-b border-zinc-200 px-2 py-2">Catégorie</th>
+                        <th className="border-b border-zinc-200 px-2 py-2 text-right">Dû</th>
+                        <th className="border-b border-zinc-200 px-2 py-2 text-right">Payé</th>
+                        <th className="border-b border-zinc-200 px-2 py-2 text-right">Reste</th>
+                        <th className="border-b border-zinc-200 px-2 py-2">Dernier paiement</th>
+                        <th className="border-b border-zinc-200 px-2 py-2">Ancienneté</th>
+                        <th className="border-b border-zinc-200 px-2 py-2"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {debtsLoading ? (
+                        <tr>
+                          <td className="px-2 py-4 text-zinc-500" colSpan={9}>
+                            Chargement…
+                          </td>
+                        </tr>
+                      ) : sortedDebts.length === 0 ? (
+                        <tr>
+                          <td className="px-2 py-4 text-zinc-500" colSpan={9}>
+                            Aucune dette ouverte.
+                          </td>
+                        </tr>
+                      ) : (
+                        sortedDebts.map((d) => {
+                          const lastPay = d.last_payment_at ? new Date(d.last_payment_at).toLocaleString('fr-FR') : '—';
+                          const ageDays = daysSince(d.entry_date);
+                          return (
+                            <tr key={d.entry_id} className="hover:bg-zinc-50">
+                              <td className="border-b border-zinc-100 px-2 py-2 tabular-nums">{d.entry_date}</td>
+                              <td className="border-b border-zinc-100 px-2 py-2">{d.vehicle_label ?? '—'}</td>
+                              <td className="border-b border-zinc-100 px-2 py-2">{d.category}</td>
+                              <td className="border-b border-zinc-100 px-2 py-2 text-right tabular-nums">
+                                {formatAriary(d.amount_ariary)} Ar
+                              </td>
+                              <td className="border-b border-zinc-100 px-2 py-2 text-right tabular-nums">
+                                {formatAriary(d.total_paid_ariary)} Ar
+                              </td>
+                              <td className="border-b border-zinc-100 px-2 py-2 text-right tabular-nums font-semibold">
+                                {formatAriary(d.remaining_amount_ariary)} Ar
+                              </td>
+                              <td className="border-b border-zinc-100 px-2 py-2 text-zinc-700">{lastPay}</td>
+                              <td className="border-b border-zinc-100 px-2 py-2 tabular-nums text-zinc-700">
+                                {ageDays == null ? '—' : `${ageDays} j`}
+                              </td>
+                              <td className="border-b border-zinc-100 px-2 py-2 text-right">
+                                <button
+                                  type="button"
+                                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
+                                  onClick={() => openPayment(d)}
+                                >
+                                  Gérer dette
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
               <section className="rounded-xl border border-zinc-200 bg-white p-4">
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div>
@@ -844,6 +982,14 @@ export default function DriverDetailPage() {
             ) : null}
           </>
         ) : null}
+
+        <FleetEntryPaymentModal
+          open={payOpen}
+          vehicleId={payVehicleId}
+          entryId={payEntryId}
+          onClose={() => setPayOpen(false)}
+          onChanged={() => setRefreshSeq((s) => s + 1)}
+        />
       </AdminShell>
     </RequireAuth>
   );

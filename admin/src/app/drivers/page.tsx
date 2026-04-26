@@ -4,10 +4,10 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { AdminShell } from '@/components/layout/AdminShell';
 import { RequireAuth } from '@/components/auth/RequireAuth';
-import { createDriver, getDriversDailySummary } from '@/lib/adminApi';
+import { createDriver, getDriverDebtsSummary, getDriversDailySummary } from '@/lib/adminApi';
 import { useBusinessDate } from '@/hooks/useBusinessDate';
 import { formatAriary } from '@/lib/money';
-import type { DriverAccountListFilter, DriverDailySummaryRow } from '@/lib/types';
+import type { DriverAccountListFilter, DriverDailySummaryRow, DriverDebtSummaryItem } from '@/lib/types';
 import { isUuidString } from '@/lib/uuid';
 
 function formatCount(n: unknown): string {
@@ -40,6 +40,10 @@ export default function DriversPage() {
   const [addSubmitting, setAddSubmitting] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
+  const [debtLoading, setDebtLoading] = useState(false);
+  const [debtError, setDebtError] = useState<string | null>(null);
+  const [debtItems, setDebtItems] = useState<DriverDebtSummaryItem[]>([]);
+
   useEffect(() => {
     let cancelled = false;
     setError(null);
@@ -58,6 +62,26 @@ export default function DriversPage() {
       cancelled = true;
     };
   }, [businessDate, driverAccountFilter, refreshSeq]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDebtLoading(true);
+    setDebtError(null);
+    void (async () => {
+      const res = await getDriverDebtsSummary();
+      if (cancelled) return;
+      if (res.error) {
+        setDebtError(res.error.message);
+        setDebtItems([]);
+      } else {
+        setDebtItems(res.data.items ?? []);
+      }
+      setDebtLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshSeq]);
 
   useEffect(() => {
     if (!addOpen) return;
@@ -128,6 +152,41 @@ export default function DriversPage() {
   }, [rows, activeOnly, payOnly, rentMissingOnly, balanceFilter]);
 
   const isEmpty = !loading && !error && rows.length === 0;
+
+  const debtKpis = useMemo(() => {
+    const driversWithDebt = debtItems.length;
+    let totalDebt = 0;
+    let fuel = 0;
+    let rent = 0;
+    for (const it of debtItems) {
+      totalDebt += Math.trunc(Number(it.total_debt_ariary ?? 0) || 0);
+      fuel += Math.trunc(Number(it.fuel_debt_ariary ?? 0) || 0);
+      rent += Math.trunc(Number(it.rent_debt_ariary ?? 0) || 0);
+    }
+    return { driversWithDebt, totalDebt, fuel, rent };
+  }, [debtItems]);
+
+  const debtSorted = useMemo(() => {
+    return [...debtItems].sort((a, b) => (b.total_debt_ariary ?? 0) - (a.total_debt_ariary ?? 0));
+  }, [debtItems]);
+
+  function daysSince(dateYmd: string | null | undefined): number | null {
+    if (!dateYmd || !String(dateYmd).trim()) return null;
+    const s = String(dateYmd).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) return null;
+    const a = new Date(`${businessDate}T00:00:00.000Z`);
+    const b = new Date(`${s}T00:00:00.000Z`);
+    const ms = a.getTime() - b.getTime();
+    if (!Number.isFinite(ms)) return null;
+    return Math.max(0, Math.floor(ms / 86_400_000));
+  }
+
+  function debtStatus(totalDebtAriary: number): 'critique' | 'à surveiller' | 'ok' {
+    if (totalDebtAriary > 50_000) return 'critique';
+    if (totalDebtAriary > 10_000) return 'à surveiller';
+    return 'ok';
+  }
 
   return (
     <RequireAuth>
@@ -245,6 +304,135 @@ export default function DriversPage() {
             </div>
           </div>
         ) : null}
+
+        <div className="mt-6 flex items-end justify-between gap-4">
+          <div>
+            <div className="text-sm font-semibold text-zinc-900">Dettes chauffeurs</div>
+            <div className="mt-1 text-xs text-zinc-600">
+              Source: RPC dettes chauffeurs (carburant/loyer), paiements partiels inclus.
+            </div>
+          </div>
+          <Link
+            className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
+            href="/drivers/debts"
+          >
+            Ouvrir la page dettes →
+          </Link>
+        </div>
+
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="rounded-lg border border-zinc-200 p-3">
+            <div className="text-xs text-zinc-600">Total dette chauffeurs</div>
+            <div className="mt-1 text-lg font-semibold">{formatAriary(debtKpis.totalDebt)} Ar</div>
+          </div>
+          <div className="rounded-lg border border-zinc-200 p-3">
+            <div className="text-xs text-zinc-600">Chauffeurs avec dette</div>
+            <div className="mt-1 text-lg font-semibold">{formatCount(debtKpis.driversWithDebt)}</div>
+          </div>
+          <div className="rounded-lg border border-zinc-200 p-3">
+            <div className="text-xs text-zinc-600">Total carburant</div>
+            <div className="mt-1 text-lg font-semibold">{formatAriary(debtKpis.fuel)} Ar</div>
+          </div>
+          <div className="rounded-lg border border-zinc-200 p-3">
+            <div className="text-xs text-zinc-600">Total loyer</div>
+            <div className="mt-1 text-lg font-semibold">{formatAriary(debtKpis.rent)} Ar</div>
+          </div>
+        </div>
+
+        {debtError ? (
+          <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+            {debtError}
+          </div>
+        ) : null}
+
+        <div className="mt-3 overflow-x-auto rounded-lg border border-zinc-200">
+          <table className="min-w-full text-sm">
+            <thead className="bg-zinc-50 text-left text-xs text-zinc-600">
+              <tr>
+                <th className="px-3 py-2">Chauffeur</th>
+                <th className="px-3 py-2">Téléphone</th>
+                <th className="px-3 py-2">Véhicule actuel</th>
+                <th className="px-3 py-2 text-right">Dette totale</th>
+                <th className="px-3 py-2 text-right">Carburant</th>
+                <th className="px-3 py-2 text-right">Loyer</th>
+                <th className="px-3 py-2 text-right">Écritures</th>
+                <th className="px-3 py-2">Dernier paiement</th>
+                <th className="px-3 py-2">Ancienneté</th>
+                <th className="px-3 py-2">Statut</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-200 bg-white">
+              {debtLoading ? (
+                <tr>
+                  <td className="px-3 py-4 text-sm text-zinc-600" colSpan={10}>
+                    Chargement…
+                  </td>
+                </tr>
+              ) : debtSorted.length === 0 ? (
+                <tr>
+                  <td className="px-3 py-4 text-sm text-zinc-600" colSpan={10}>
+                    Aucune dette chauffeur ouverte.
+                  </td>
+                </tr>
+              ) : (
+                debtSorted.map((d) => {
+                  const total = Math.trunc(Number(d.total_debt_ariary ?? 0) || 0);
+                  const st = debtStatus(total);
+                  const ageDays = daysSince(d.oldest_entry_date);
+                  const ageTone =
+                    ageDays != null && ageDays > 7 ? 'text-red-800' : ageDays != null && ageDays > 3 ? 'text-amber-800' : 'text-zinc-700';
+                  const lastPay = d.last_payment_at ? new Date(d.last_payment_at).toLocaleString('fr-FR') : '—';
+                  return (
+                    <tr key={d.driver_id} className="hover:bg-zinc-50">
+                      <td className="px-3 py-2 font-medium text-zinc-900">{d.driver_name ?? '—'}</td>
+                      <td className="px-3 py-2 text-zinc-700">{d.driver_phone ?? '—'}</td>
+                      <td className="px-3 py-2 text-zinc-700">
+                        {d.current_vehicle_id ? (
+                          <Link className="underline hover:text-zinc-900" href={`/fleet/${d.current_vehicle_id}`}>
+                            {d.current_vehicle_label ?? 'Véhicule'}
+                          </Link>
+                        ) : (
+                          <span className="text-zinc-500">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums font-semibold">{formatAriary(total)} Ar</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatAriary(d.fuel_debt_ariary)} Ar</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatAriary(d.rent_debt_ariary)} Ar</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatCount(d.open_entries_count)}</td>
+                      <td className="px-3 py-2 text-zinc-700">{lastPay}</td>
+                      <td className="px-3 py-2">
+                        {ageDays == null ? (
+                          <span className="text-zinc-500">—</span>
+                        ) : (
+                          <div className="leading-tight">
+                            <div className={`tabular-nums font-medium ${ageTone}`}>{ageDays} j</div>
+                            <div className="mt-0.5 tabular-nums text-[11px] text-zinc-500">
+                              {d.oldest_entry_date}
+                            </div>
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span
+                          className={
+                            'inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ' +
+                            (st === 'critique'
+                              ? 'border-red-200 bg-red-50 text-red-900'
+                              : st === 'à surveiller'
+                                ? 'border-amber-200 bg-amber-50 text-amber-900'
+                                : 'border-emerald-200 bg-emerald-50 text-emerald-900')
+                          }
+                        >
+                          {st}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
 
         {addOpen ? (
           <div

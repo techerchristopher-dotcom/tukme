@@ -180,6 +180,7 @@ export type DriverDebtSummaryItem = {
   fuel_debt_ariary: number;
   rent_debt_ariary: number;
   last_payment_at: string | null;
+  oldest_entry_date: string | null; // YYYY-MM-DD
   current_vehicle_id: string | null;
   current_vehicle_label: string | null;
   current_assignment_id: string | null;
