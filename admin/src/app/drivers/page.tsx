@@ -347,7 +347,7 @@ export default function DriversPage() {
           </div>
         ) : null}
 
-        <div className="mt-3 overflow-x-auto rounded-lg border border-zinc-200">
+        <div className="mt-3 hidden overflow-x-auto rounded-lg border border-zinc-200 md:block">
           <table className="min-w-full text-sm">
             <thead className="bg-zinc-50 text-left text-xs text-zinc-600">
               <tr>
@@ -434,6 +434,117 @@ export default function DriversPage() {
               )}
             </tbody>
           </table>
+        </div>
+
+        <div className="mt-3 md:hidden">
+          {debtLoading ? (
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-600">
+              Chargement…
+            </div>
+          ) : debtSorted.length === 0 ? (
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-600">
+              Aucune dette chauffeur ouverte.
+            </div>
+          ) : (
+            <ul className="flex flex-col gap-3">
+              {debtSorted.map((d) => {
+                const total = Math.trunc(Number(d.total_debt_ariary ?? 0) || 0);
+                const st = debtStatus(total);
+                const ageDays = daysSince(d.oldest_entry_date);
+                const ageTone =
+                  ageDays != null && ageDays > 7
+                    ? 'text-red-800'
+                    : ageDays != null && ageDays > 3
+                      ? 'text-amber-800'
+                      : 'text-zinc-700';
+                const lastPay = d.last_payment_at
+                  ? new Date(d.last_payment_at).toLocaleString('fr-FR')
+                  : '—';
+                return (
+                  <li
+                    key={d.driver_id}
+                    className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-base font-semibold text-zinc-900">
+                          {d.driver_name ?? '—'}
+                        </div>
+                        <div className="mt-0.5 truncate text-sm text-zinc-600">
+                          {d.driver_phone ?? '—'}
+                        </div>
+                      </div>
+                      <span
+                        className={
+                          'shrink-0 inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ' +
+                          (st === 'critique'
+                            ? 'border-red-200 bg-red-50 text-red-900'
+                            : st === 'à surveiller'
+                              ? 'border-amber-200 bg-amber-50 text-amber-900'
+                              : 'border-emerald-200 bg-emerald-50 text-emerald-900')
+                        }
+                      >
+                        {st}
+                      </span>
+                    </div>
+
+                    <div className="mt-3 flex items-end justify-between gap-3">
+                      <div className="text-sm text-zinc-700">
+                        <span className="text-zinc-500">Véhicule : </span>
+                        {d.current_vehicle_id ? (
+                          <Link
+                            className="underline hover:text-zinc-900"
+                            href={`/fleet/${d.current_vehicle_id}`}
+                          >
+                            {d.current_vehicle_label ?? 'Véhicule'}
+                          </Link>
+                        ) : (
+                          <span className="text-zinc-500">—</span>
+                        )}
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[11px] uppercase tracking-wide text-zinc-500">Dette</div>
+                        <div className="mt-0.5 text-lg font-bold tabular-nums text-zinc-900">
+                          {formatAriary(total)} Ar
+                        </div>
+                      </div>
+                    </div>
+
+                    <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                      <div>
+                        <dt className="text-xs text-zinc-500">Carburant</dt>
+                        <dd className="mt-0.5 font-medium tabular-nums">
+                          {formatAriary(d.fuel_debt_ariary)} Ar
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-zinc-500">Loyer</dt>
+                        <dd className="mt-0.5 font-medium tabular-nums">
+                          {formatAriary(d.rent_debt_ariary)} Ar
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-zinc-500">Écritures ouvertes</dt>
+                        <dd className="mt-0.5 font-medium tabular-nums">
+                          {formatCount(d.open_entries_count)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-zinc-500">Ancienneté</dt>
+                        <dd className={`mt-0.5 font-medium tabular-nums ${ageTone}`}>
+                          {ageDays == null ? '—' : `${ageDays} j`}
+                        </dd>
+                      </div>
+                      <div className="col-span-2">
+                        <dt className="text-xs text-zinc-500">Dernier paiement</dt>
+                        <dd className="mt-0.5 break-words text-zinc-700">{lastPay}</dd>
+                      </div>
+                    </dl>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
 
         {addOpen ? (

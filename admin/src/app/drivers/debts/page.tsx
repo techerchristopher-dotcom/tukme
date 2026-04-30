@@ -211,56 +211,140 @@ export default function DriversDebtsPage() {
             Aucune dette chauffeur ouverte.
           </div>
         ) : (
-          <div className="mt-4 overflow-x-auto rounded-lg border border-zinc-200">
-            <table className="min-w-full text-sm">
-              <thead className="bg-zinc-50 text-left text-xs text-zinc-600">
-                <tr>
-                  <th className="px-3 py-2">Chauffeur</th>
-                  <th className="px-3 py-2">Téléphone</th>
-                  <th className="px-3 py-2">Véhicule actuel</th>
-                  <th className="px-3 py-2 text-right">Dette totale</th>
-                  <th className="px-3 py-2 text-right">Carburant</th>
-                  <th className="px-3 py-2 text-right">Loyer</th>
-                  <th className="px-3 py-2 text-right">Écritures</th>
-                  <th className="px-3 py-2">Dernier paiement</th>
-                  <th className="px-3 py-2"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-200 bg-white">
-                {sorted.map((r) => (
-                  <tr key={r.driver_id} className="hover:bg-zinc-50">
-                    <td className="px-3 py-2 font-medium text-zinc-900">{r.driver_name ?? '—'}</td>
-                    <td className="px-3 py-2 text-zinc-700">{r.driver_phone ?? '—'}</td>
-                    <td className="px-3 py-2 text-zinc-700">
+          <>
+            <div className="mt-4 hidden overflow-x-auto rounded-lg border border-zinc-200 md:block">
+              <table className="min-w-full text-sm">
+                <thead className="bg-zinc-50 text-left text-xs text-zinc-600">
+                  <tr>
+                    <th className="px-3 py-2">Chauffeur</th>
+                    <th className="px-3 py-2">Téléphone</th>
+                    <th className="px-3 py-2">Véhicule actuel</th>
+                    <th className="px-3 py-2 text-right">Dette totale</th>
+                    <th className="px-3 py-2 text-right">Carburant</th>
+                    <th className="px-3 py-2 text-right">Loyer</th>
+                    <th className="px-3 py-2 text-right">Écritures</th>
+                    <th className="px-3 py-2">Dernier paiement</th>
+                    <th className="px-3 py-2"></th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-200 bg-white">
+                  {sorted.map((r) => (
+                    <tr key={r.driver_id} className="hover:bg-zinc-50">
+                      <td className="px-3 py-2 font-medium text-zinc-900">{r.driver_name ?? '—'}</td>
+                      <td className="px-3 py-2 text-zinc-700">{r.driver_phone ?? '—'}</td>
+                      <td className="px-3 py-2 text-zinc-700">
+                        {r.current_vehicle_id ? (
+                          <Link className="underline hover:text-zinc-900" href={`/fleet/${encodeURIComponent(r.current_vehicle_id)}`}>
+                            {r.current_vehicle_label ?? 'Véhicule'}
+                          </Link>
+                        ) : (
+                          <span className="text-zinc-500">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums font-semibold">
+                        {formatAriary(r.total_debt_ariary)} Ar
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatAriary(r.fuel_debt_ariary)} Ar</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatAriary(r.rent_debt_ariary)} Ar</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatCount(r.open_entries_count)}</td>
+                      <td className="px-3 py-2 text-zinc-700">{fmtDate(r.last_payment_at)}</td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        <button
+                          type="button"
+                          className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
+                          onClick={() => openDetail(r)}
+                        >
+                          Voir détail
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <ul className="mt-4 flex flex-col gap-3 md:hidden">
+              {sorted.map((r) => {
+                const ageDays = daysSince(r.oldest_entry_date);
+                return (
+                  <li
+                    key={r.driver_id}
+                    className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-base font-semibold text-zinc-900">
+                          {r.driver_name ?? '—'}
+                        </div>
+                        <div className="mt-0.5 truncate text-sm text-zinc-600">
+                          {r.driver_phone ?? '—'}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <div className="text-[11px] uppercase tracking-wide text-zinc-500">Dette totale</div>
+                        <div className="mt-0.5 text-lg font-bold tabular-nums text-zinc-900">
+                          {formatAriary(r.total_debt_ariary)} Ar
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-3 text-sm text-zinc-700">
+                      <span className="text-zinc-500">Véhicule : </span>
                       {r.current_vehicle_id ? (
-                        <Link className="underline hover:text-zinc-900" href={`/fleet/${encodeURIComponent(r.current_vehicle_id)}`}>
+                        <Link
+                          className="underline hover:text-zinc-900"
+                          href={`/fleet/${encodeURIComponent(r.current_vehicle_id)}`}
+                        >
                           {r.current_vehicle_label ?? 'Véhicule'}
                         </Link>
                       ) : (
                         <span className="text-zinc-500">—</span>
                       )}
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums font-semibold">
-                      {formatAriary(r.total_debt_ariary)} Ar
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatAriary(r.fuel_debt_ariary)} Ar</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatAriary(r.rent_debt_ariary)} Ar</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{formatCount(r.open_entries_count)}</td>
-                    <td className="px-3 py-2 text-zinc-700">{fmtDate(r.last_payment_at)}</td>
-                    <td className="px-3 py-2 text-right whitespace-nowrap">
-                      <button
-                        type="button"
-                        className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
-                        onClick={() => openDetail(r)}
-                      >
-                        Voir détail
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                    </div>
+
+                    <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                      <div>
+                        <dt className="text-xs text-zinc-500">Carburant</dt>
+                        <dd className="mt-0.5 font-medium tabular-nums">
+                          {formatAriary(r.fuel_debt_ariary)} Ar
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-zinc-500">Loyer</dt>
+                        <dd className="mt-0.5 font-medium tabular-nums">
+                          {formatAriary(r.rent_debt_ariary)} Ar
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-zinc-500">Écritures ouvertes</dt>
+                        <dd className="mt-0.5 font-medium tabular-nums">
+                          {formatCount(r.open_entries_count)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-zinc-500">Ancienneté</dt>
+                        <dd className="mt-0.5 font-medium tabular-nums">
+                          {ageDays == null ? '—' : `${ageDays} j`}
+                        </dd>
+                      </div>
+                      <div className="col-span-2">
+                        <dt className="text-xs text-zinc-500">Dernier paiement</dt>
+                        <dd className="mt-0.5 text-zinc-700">{fmtDate(r.last_payment_at)}</dd>
+                      </div>
+                    </dl>
+
+                    <button
+                      type="button"
+                      className="mt-4 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm font-medium text-white hover:bg-zinc-800"
+                      onClick={() => openDetail(r)}
+                    >
+                      Voir détail
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
         )}
 
         {detailOpen && detailDriver ? (
@@ -319,7 +403,7 @@ export default function DriversDebtsPage() {
                     </div>
                   ) : null}
 
-                  <div className="mt-4 overflow-x-auto rounded-lg border border-zinc-200">
+                  <div className="mt-4 hidden overflow-x-auto rounded-lg border border-zinc-200 md:block">
                     <table className="min-w-full text-sm">
                       <thead className="bg-zinc-50 text-left text-xs text-zinc-600">
                         <tr>
@@ -402,6 +486,108 @@ export default function DriversDebtsPage() {
                         )}
                       </tbody>
                     </table>
+                  </div>
+
+                  <div className="mt-4 md:hidden">
+                    {detailLoading ? (
+                      <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-600">
+                        Chargement…
+                      </div>
+                    ) : detailItems.length === 0 ? (
+                      <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-600">
+                        Aucune écriture ouverte.
+                      </div>
+                    ) : (
+                      <ul className="flex flex-col gap-3">
+                        {detailItems.map((it) => {
+                          const ageDays = daysSince(it.entry_date);
+                          const ageTone =
+                            ageDays != null && ageDays > 7
+                              ? 'text-red-800'
+                              : ageDays != null && ageDays > 3
+                                ? 'text-amber-800'
+                                : 'text-zinc-700';
+                          return (
+                            <li
+                              key={it.entry_id}
+                              className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-xs text-zinc-500">Date</div>
+                                  <div className="mt-0.5 tabular-nums text-sm font-medium text-zinc-900">
+                                    {it.entry_date}
+                                  </div>
+                                </div>
+                                <div className="shrink-0 text-right">
+                                  <div className="text-[11px] uppercase tracking-wide text-zinc-500">Reste</div>
+                                  <div className="mt-0.5 text-lg font-bold tabular-nums text-zinc-900">
+                                    {formatAriary(it.remaining_amount_ariary)} Ar
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="mt-3 text-sm text-zinc-700">
+                                <span className="text-zinc-500">Véhicule : </span>
+                                <Link
+                                  className="underline hover:text-zinc-900"
+                                  href={`/fleet/${encodeURIComponent(it.vehicle_id)}`}
+                                >
+                                  {it.vehicle_label ?? 'Véhicule'}
+                                </Link>
+                              </div>
+
+                              <dl className="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                                <div>
+                                  <dt className="text-xs text-zinc-500">Catégorie</dt>
+                                  <dd className="mt-0.5 text-zinc-800">{it.category}</dd>
+                                </div>
+                                <div>
+                                  <dt className="text-xs text-zinc-500">Statut</dt>
+                                  <dd className="mt-0.5 text-zinc-800">{paymentStatusLabel(it.payment_status)}</dd>
+                                </div>
+                                <div>
+                                  <dt className="text-xs text-zinc-500">Dû</dt>
+                                  <dd className="mt-0.5 font-medium tabular-nums">
+                                    {formatAriary(it.amount_ariary)} Ar
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt className="text-xs text-zinc-500">Payé</dt>
+                                  <dd className="mt-0.5 font-medium tabular-nums">
+                                    {formatAriary(it.total_paid_ariary)} Ar
+                                  </dd>
+                                </div>
+                                <div>
+                                  <dt className="text-xs text-zinc-500">Ancienneté</dt>
+                                  <dd className={`mt-0.5 font-medium tabular-nums ${ageTone}`}>
+                                    {ageDays == null ? '—' : `${ageDays} j`}
+                                  </dd>
+                                </div>
+                                <div className="col-span-2">
+                                  <dt className="text-xs text-zinc-500">Libellé</dt>
+                                  <dd className="mt-0.5 break-words text-zinc-800">{it.label ?? '—'}</dd>
+                                </div>
+                                <div className="col-span-2">
+                                  <dt className="text-xs text-zinc-500">Période</dt>
+                                  <dd className="mt-0.5 break-words tabular-nums text-xs text-zinc-600">
+                                    {fmtDate(it.assignment_starts_at)} → {fmtDate(it.assignment_ends_at)}
+                                  </dd>
+                                </div>
+                              </dl>
+
+                              <button
+                                type="button"
+                                className="mt-4 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-sm font-medium text-white hover:bg-zinc-800"
+                                onClick={() => openPayment(it)}
+                              >
+                                Gérer dette
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
                   </div>
 
                   <div className="mt-3 text-xs text-zinc-500">
