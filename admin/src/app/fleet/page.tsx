@@ -190,7 +190,7 @@ export default function FleetVehiclesPage() {
           </div>
         ) : null}
 
-        <div className="mt-4 overflow-x-auto">
+        <div className="mt-4 hidden overflow-x-auto md:block">
           <table className="min-w-full border-separate border-spacing-0 text-sm">
             <thead>
               <tr className="text-left text-xs text-zinc-600">
@@ -268,6 +268,93 @@ export default function FleetVehiclesPage() {
               ) : null}
             </tbody>
           </table>
+        </div>
+
+        <div className="mt-4 md:hidden">
+          {!loading && !visible.length ? (
+            <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-600">
+              {isEmpty ? 'Aucun véhicule.' : 'Aucun résultat.'}
+            </div>
+          ) : (
+            <ul className="flex flex-col gap-3">
+              {visible.map((v) => {
+                const brandModel = [v.brand, v.model].filter(Boolean).join(' ');
+                const assignmentDate = v.active_assignment?.starts_at
+                  ? new Date(v.active_assignment.starts_at).toLocaleDateString('fr-FR')
+                  : null;
+                return (
+                  <li
+                    key={v.id}
+                    className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm space-y-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <Link
+                          href={`/fleet/${encodeURIComponent(v.id)}`}
+                          className="block truncate font-mono text-base font-bold text-zinc-900 hover:underline"
+                        >
+                          {v.plate_number ?? '—'}
+                        </Link>
+                        {brandModel ? (
+                          <div className="mt-0.5 truncate text-sm text-zinc-700">{brandModel}</div>
+                        ) : null}
+                      </div>
+                      <span className="shrink-0 inline-flex items-center rounded-full border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-700">
+                        {v.status ?? '—'}
+                      </span>
+                    </div>
+
+                    <div className="text-sm">
+                      <div className="text-xs text-zinc-500">Chauffeur actuel</div>
+                      {v.active_assignment ? (
+                        <div className="mt-0.5">
+                          <div className="truncate font-medium text-zinc-900">
+                            {v.active_assignment.driver_full_name ?? 'Chauffeur'}
+                          </div>
+                          <div className="mt-0.5 truncate text-xs text-zinc-500">
+                            {v.active_assignment.driver_phone ?? '—'}
+                            {assignmentDate ? ` · depuis ${assignmentDate}` : ''}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-0.5 text-zinc-500">—</div>
+                      )}
+                    </div>
+
+                    <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                      <div>
+                        <dt className="text-xs text-zinc-500">Achat (Ar)</dt>
+                        <dd className="mt-0.5 font-medium tabular-nums">
+                          {formatAriary(v.purchase_price_ariary)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-zinc-500">Loyer/j (Ar)</dt>
+                        <dd className="mt-0.5 font-medium tabular-nums">
+                          {formatAriary(v.daily_rent_ariary)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-zinc-500">Net</dt>
+                        <dd className="mt-0.5 text-zinc-500">—</dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-zinc-500">Reste amort.</dt>
+                        <dd className="mt-0.5 text-zinc-500">—</dd>
+                      </div>
+                    </dl>
+
+                    <Link
+                      href={`/fleet/${encodeURIComponent(v.id)}`}
+                      className="block w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2.5 text-center text-sm font-medium text-white hover:bg-zinc-800"
+                    >
+                      Ouvrir
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
 
         {createOpen ? (
