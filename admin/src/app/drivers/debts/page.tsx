@@ -247,7 +247,7 @@ export default function DriversDebtsPage() {
                     <td className="px-3 py-2 text-right tabular-nums">{formatAriary(r.rent_debt_ariary)} Ar</td>
                     <td className="px-3 py-2 text-right tabular-nums">{formatCount(r.open_entries_count)}</td>
                     <td className="px-3 py-2 text-zinc-700">{fmtDate(r.last_payment_at)}</td>
-                    <td className="px-3 py-2 text-right">
+                    <td className="px-3 py-2 text-right whitespace-nowrap">
                       <button
                         type="button"
                         className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
@@ -265,7 +265,7 @@ export default function DriversDebtsPage() {
 
         {detailOpen && detailDriver ? (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
             role="presentation"
             onClick={() => setDetailOpen(false)}
           >
@@ -273,136 +273,142 @@ export default function DriversDebtsPage() {
               role="dialog"
               aria-modal="true"
               aria-labelledby="driver-debt-detail-title"
-              className="w-full max-w-5xl rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+              className="my-6 w-full max-w-5xl rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[90vh] overflow-hidden"
               onClick={(ev) => ev.stopPropagation()}
             >
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h2 id="driver-debt-detail-title" className="text-lg font-semibold">
-                    Dette — {detailDriver.driver_name ?? 'Chauffeur'}
-                  </h2>
-                  <div className="mt-1 text-sm text-zinc-600">
-                    {detailDriver.driver_phone ?? '—'} · {formatCount(detailDriver.open_entries_count)} écriture(s) ouverte(s)
+              <div className="flex max-h-[90vh] flex-col">
+                <div className="sticky top-0 z-10 -mx-4 border-b border-zinc-200 bg-white px-4 pb-3 sm:-mx-5 sm:px-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h2 id="driver-debt-detail-title" className="text-lg font-semibold">
+                        Dette — {detailDriver.driver_name ?? 'Chauffeur'}
+                      </h2>
+                      <div className="mt-1 text-sm text-zinc-600">
+                        {detailDriver.driver_phone ?? '—'} · {formatCount(detailDriver.open_entries_count)} écriture(s) ouverte(s)
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
+                      onClick={() => setDetailOpen(false)}
+                    >
+                      Fermer
+                    </button>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
-                  onClick={() => setDetailOpen(false)}
-                >
-                  Fermer
-                </button>
-              </div>
 
-              <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <div className="rounded-lg border border-zinc-200 p-3">
-                  <div className="text-xs text-zinc-600">Dette totale</div>
-                  <div className="mt-1 text-lg font-semibold">{formatAriary(detailKpis.total)} Ar</div>
-                </div>
-                <div className="rounded-lg border border-zinc-200 p-3">
-                  <div className="text-xs text-zinc-600">Carburant</div>
-                  <div className="mt-1 text-lg font-semibold">{formatAriary(detailKpis.fuel)} Ar</div>
-                </div>
-                <div className="rounded-lg border border-zinc-200 p-3">
-                  <div className="text-xs text-zinc-600">Loyer</div>
-                  <div className="mt-1 text-lg font-semibold">{formatAriary(detailKpis.rent)} Ar</div>
-                </div>
-              </div>
+                <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pt-4">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <div className="rounded-lg border border-zinc-200 p-3">
+                      <div className="text-xs text-zinc-600">Dette totale</div>
+                      <div className="mt-1 text-lg font-semibold">{formatAriary(detailKpis.total)} Ar</div>
+                    </div>
+                    <div className="rounded-lg border border-zinc-200 p-3">
+                      <div className="text-xs text-zinc-600">Carburant</div>
+                      <div className="mt-1 text-lg font-semibold">{formatAriary(detailKpis.fuel)} Ar</div>
+                    </div>
+                    <div className="rounded-lg border border-zinc-200 p-3">
+                      <div className="text-xs text-zinc-600">Loyer</div>
+                      <div className="mt-1 text-lg font-semibold">{formatAriary(detailKpis.rent)} Ar</div>
+                    </div>
+                  </div>
 
-              {detailError ? (
-                <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
-                  {detailError}
-                </div>
-              ) : null}
+                  {detailError ? (
+                    <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+                      {detailError}
+                    </div>
+                  ) : null}
 
-              <div className="mt-4 overflow-x-auto rounded-lg border border-zinc-200">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-zinc-50 text-left text-xs text-zinc-600">
-                    <tr>
-                      <th className="px-3 py-2">Date</th>
-                      <th className="px-3 py-2">Véhicule</th>
-                      <th className="px-3 py-2">Catégorie</th>
-                      <th className="px-3 py-2">Libellé</th>
-                      <th className="px-3 py-2 text-right">Dû</th>
-                      <th className="px-3 py-2 text-right">Payé</th>
-                      <th className="px-3 py-2 text-right">Reste</th>
-                      <th className="px-3 py-2">Statut</th>
-                      <th className="px-3 py-2">Ancienneté</th>
-                      <th className="px-3 py-2">Période</th>
-                      <th className="px-3 py-2"></th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-200 bg-white">
-                    {detailLoading ? (
-                      <tr>
-                        <td className="px-3 py-4 text-sm text-zinc-600" colSpan={11}>
-                          Chargement…
-                        </td>
-                      </tr>
-                    ) : detailItems.length === 0 ? (
-                      <tr>
-                        <td className="px-3 py-4 text-sm text-zinc-600" colSpan={11}>
-                          Aucune écriture ouverte.
-                        </td>
-                      </tr>
-                    ) : (
-                      detailItems.map((it) => (
-                        <tr key={it.entry_id} className="hover:bg-zinc-50">
-                          <td className="px-3 py-2 tabular-nums">{it.entry_date}</td>
-                          <td className="px-3 py-2">
-                            <Link
-                              className="underline hover:text-zinc-900"
-                              href={`/fleet/${encodeURIComponent(it.vehicle_id)}`}
-                            >
-                              {it.vehicle_label ?? 'Véhicule'}
-                            </Link>
-                          </td>
-                          <td className="px-3 py-2">{it.category}</td>
-                          <td className="px-3 py-2">{it.label ?? '—'}</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{formatAriary(it.amount_ariary)} Ar</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{formatAriary(it.total_paid_ariary)} Ar</td>
-                          <td className="px-3 py-2 text-right tabular-nums font-semibold">
-                            {formatAriary(it.remaining_amount_ariary)} Ar
-                          </td>
-                          <td className="px-3 py-2">{paymentStatusLabel(it.payment_status)}</td>
-                          <td className="px-3 py-2">
-                            {(() => {
-                              const ageDays = daysSince(it.entry_date);
-                              if (ageDays == null) return <span className="text-zinc-500">—</span>;
-                              const tone =
-                                ageDays > 7
-                                  ? 'text-red-800'
-                                  : ageDays > 3
-                                    ? 'text-amber-800'
-                                    : 'text-zinc-700';
-                              return <span className={`tabular-nums font-medium ${tone}`}>{ageDays} j</span>;
-                            })()}
-                          </td>
-                          <td className="px-3 py-2 text-xs text-zinc-600">
-                            <div className="tabular-nums">
-                              {fmtDate(it.assignment_starts_at)} → {fmtDate(it.assignment_ends_at)}
-                            </div>
-                            <div className="mt-0.5 font-mono text-[10px] text-zinc-500">{it.assignment_id ?? '—'}</div>
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            <button
-                              type="button"
-                              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
-                              onClick={() => openPayment(it)}
-                            >
-                              Gérer dette
-                            </button>
-                          </td>
+                  <div className="mt-4 overflow-x-auto rounded-lg border border-zinc-200">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-zinc-50 text-left text-xs text-zinc-600">
+                        <tr>
+                          <th className="px-3 py-2">Date</th>
+                          <th className="px-3 py-2">Véhicule</th>
+                          <th className="px-3 py-2">Catégorie</th>
+                          <th className="px-3 py-2">Libellé</th>
+                          <th className="px-3 py-2 text-right">Dû</th>
+                          <th className="px-3 py-2 text-right">Payé</th>
+                          <th className="px-3 py-2 text-right">Reste</th>
+                          <th className="px-3 py-2">Statut</th>
+                          <th className="px-3 py-2">Ancienneté</th>
+                          <th className="px-3 py-2">Période</th>
+                          <th className="px-3 py-2"></th>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                      </thead>
+                      <tbody className="divide-y divide-zinc-200 bg-white">
+                        {detailLoading ? (
+                          <tr>
+                            <td className="px-3 py-4 text-sm text-zinc-600" colSpan={11}>
+                              Chargement…
+                            </td>
+                          </tr>
+                        ) : detailItems.length === 0 ? (
+                          <tr>
+                            <td className="px-3 py-4 text-sm text-zinc-600" colSpan={11}>
+                              Aucune écriture ouverte.
+                            </td>
+                          </tr>
+                        ) : (
+                          detailItems.map((it) => (
+                            <tr key={it.entry_id} className="hover:bg-zinc-50">
+                              <td className="px-3 py-2 tabular-nums">{it.entry_date}</td>
+                              <td className="px-3 py-2">
+                                <Link
+                                  className="underline hover:text-zinc-900"
+                                  href={`/fleet/${encodeURIComponent(it.vehicle_id)}`}
+                                >
+                                  {it.vehicle_label ?? 'Véhicule'}
+                                </Link>
+                              </td>
+                              <td className="px-3 py-2">{it.category}</td>
+                              <td className="px-3 py-2">{it.label ?? '—'}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{formatAriary(it.amount_ariary)} Ar</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{formatAriary(it.total_paid_ariary)} Ar</td>
+                              <td className="px-3 py-2 text-right tabular-nums font-semibold">
+                                {formatAriary(it.remaining_amount_ariary)} Ar
+                              </td>
+                              <td className="px-3 py-2">{paymentStatusLabel(it.payment_status)}</td>
+                              <td className="px-3 py-2">
+                                {(() => {
+                                  const ageDays = daysSince(it.entry_date);
+                                  if (ageDays == null) return <span className="text-zinc-500">—</span>;
+                                  const tone =
+                                    ageDays > 7
+                                      ? 'text-red-800'
+                                      : ageDays > 3
+                                        ? 'text-amber-800'
+                                        : 'text-zinc-700';
+                                  return <span className={`tabular-nums font-medium ${tone}`}>{ageDays} j</span>;
+                                })()}
+                              </td>
+                              <td className="px-3 py-2 text-xs text-zinc-600">
+                                <div className="tabular-nums">
+                                  {fmtDate(it.assignment_starts_at)} → {fmtDate(it.assignment_ends_at)}
+                                </div>
+                                <div className="mt-0.5 font-mono text-[10px] text-zinc-500">{it.assignment_id ?? '—'}</div>
+                              </td>
+                              <td className="px-3 py-2 text-right whitespace-nowrap">
+                                <button
+                                  type="button"
+                                  className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100"
+                                  onClick={() => openPayment(it)}
+                                >
+                                  Gérer dette
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
 
-              <div className="mt-3 text-xs text-zinc-500">
-                Astuce: clique sur <strong>Gérer dette</strong> pour ouvrir la fenêtre de paiement (historique +
-                paiement partiel / solde) sans quitter cette page.
+                  <div className="mt-3 text-xs text-zinc-500">
+                    Astuce: clique sur <strong>Gérer dette</strong> pour ouvrir la fenêtre de paiement (historique +
+                    paiement partiel / solde) sans quitter cette page.
+                  </div>
+                </div>
               </div>
             </div>
           </div>

@@ -134,12 +134,12 @@ export default function FleetVehiclesPage() {
   return (
     <RequireAuth>
       <AdminShell title="Suivi du parc">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div className="flex flex-wrap items-end gap-3">
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between md:gap-4">
+          <div className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-end md:gap-3">
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-zinc-700">Recherche plaque</span>
               <input
-                className="w-56 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                className="w-full md:w-56 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                 placeholder="ex: 1234TAA"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
@@ -148,7 +148,7 @@ export default function FleetVehiclesPage() {
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-zinc-700">Statut</span>
               <select
-                className="w-48 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                className="w-full md:w-48 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                 value={status}
                 onChange={(e) => setStatus(normalizeStatus(e.target.value))}
               >
@@ -159,22 +159,24 @@ export default function FleetVehiclesPage() {
                 <option value="retired">Retiré</option>
               </select>
             </label>
-            <button
-              type="button"
-              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
-              disabled={loading}
-              onClick={() => setRefreshSeq((s) => s + 1)}
-            >
-              {loading ? 'Chargement…' : 'Rafraîchir'}
-            </button>
-            <button
-              type="button"
-              className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
-              disabled={loading || createSubmitting}
-              onClick={openCreate}
-            >
-              Créer un véhicule
-            </button>
+            <div className="flex flex-col gap-2 md:flex-row md:items-center">
+              <button
+                type="button"
+                className="w-full md:w-auto rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                disabled={loading}
+                onClick={() => setRefreshSeq((s) => s + 1)}
+              >
+                {loading ? 'Chargement…' : 'Rafraîchir'}
+              </button>
+              <button
+                type="button"
+                className="w-full md:w-auto rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+                disabled={loading || createSubmitting}
+                onClick={openCreate}
+              >
+                Créer un véhicule
+              </button>
+            </div>
           </div>
 
           <div className="text-sm text-zinc-600">
@@ -247,7 +249,7 @@ export default function FleetVehiclesPage() {
                   </td>
                   <td className="border-b border-zinc-100 px-3 py-2 text-zinc-500">—</td>
                   <td className="border-b border-zinc-100 px-3 py-2 text-zinc-500">—</td>
-                  <td className="border-b border-zinc-100 px-3 py-2">
+                  <td className="border-b border-zinc-100 px-3 py-2 whitespace-nowrap">
                     <Link
                       href={`/fleet/${encodeURIComponent(v.id)}`}
                       className="rounded-lg border border-zinc-200 bg-white px-2 py-1 text-xs hover:bg-zinc-100"
@@ -270,7 +272,7 @@ export default function FleetVehiclesPage() {
 
         {createOpen ? (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
             role="presentation"
             onClick={() => !createSubmitting && setCreateOpen(false)}
           >
@@ -278,14 +280,28 @@ export default function FleetVehiclesPage() {
               role="dialog"
               aria-modal="true"
               aria-labelledby="create-vehicle-title"
-              className="w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+              className="my-6 w-full max-w-lg rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[90vh] overflow-hidden"
               onClick={(e) => e.stopPropagation()}
               onKeyDown={(e) => e.stopPropagation()}
             >
-              <h2 id="create-vehicle-title" className="text-lg font-semibold text-zinc-900">
-                Nouveau véhicule
-              </h2>
-              <form className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2" onSubmit={submitCreate}>
+              <div className="flex max-h-[90vh] flex-col">
+                <div className="sticky top-0 z-10 -mx-4 border-b border-zinc-200 bg-white px-4 pb-3 sm:-mx-5 sm:px-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <h2 id="create-vehicle-title" className="text-lg font-semibold text-zinc-900">
+                      Nouveau véhicule
+                    </h2>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                      disabled={createSubmitting}
+                      onClick={() => setCreateOpen(false)}
+                    >
+                      Fermer
+                    </button>
+                  </div>
+                </div>
+
+                <form className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pt-4 grid grid-cols-1 gap-3 sm:grid-cols-2" onSubmit={submitCreate}>
                 <label className="flex flex-col gap-1 text-sm sm:col-span-1">
                   <span className="text-zinc-700">Plaque</span>
                   <input
@@ -404,10 +420,10 @@ export default function FleetVehiclesPage() {
                   </div>
                 ) : null}
 
-                <div className="sm:col-span-2 mt-1 flex justify-end gap-2">
+                <div className="sm:col-span-2 mt-1 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                   <button
                     type="button"
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                    className="w-full sm:w-auto rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
                     disabled={createSubmitting}
                     onClick={() => setCreateOpen(false)}
                   >
@@ -415,13 +431,14 @@ export default function FleetVehiclesPage() {
                   </button>
                   <button
                     type="submit"
-                    className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+                    className="w-full sm:w-auto rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
                     disabled={createSubmitting}
                   >
                     {createSubmitting ? 'Création…' : 'Créer'}
                   </button>
                 </div>
               </form>
+              </div>
             </div>
           </div>
         ) : null}

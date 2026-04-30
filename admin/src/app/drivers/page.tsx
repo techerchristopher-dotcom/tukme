@@ -191,12 +191,12 @@ export default function DriversPage() {
   return (
     <RequireAuth>
       <AdminShell title="Chauffeurs">
-        <div className="flex items-end justify-between gap-4">
-          <div className="flex flex-wrap items-end gap-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between md:gap-4">
+          <div className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-end md:gap-4">
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-zinc-700">Jour (Madagascar)</span>
               <input
-                className="w-44 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                className="w-full md:w-44 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                 type="date"
                 value={businessDate}
                 onChange={(e) => setBusinessDate(e.target.value)}
@@ -206,7 +206,7 @@ export default function DriversPage() {
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-zinc-700">Statut compte</span>
               <select
-                className="w-44 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                className="w-full md:w-44 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                 value={driverAccountFilter}
                 onChange={(e) => setDriverAccountFilter(e.target.value as DriverAccountListFilter)}
               >
@@ -242,7 +242,7 @@ export default function DriversPage() {
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-zinc-700">Balance</span>
               <select
-                className="w-44 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                className="w-full md:w-44 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                 value={balanceFilter}
                 onChange={(e) =>
                   setBalanceFilter(e.target.value as 'all' | 'positive' | 'negative')
@@ -254,23 +254,25 @@ export default function DriversPage() {
               </select>
             </label>
 
-            <button
-              type="button"
-              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
-              disabled={loading}
-              onClick={() => setRefreshSeq((s) => s + 1)}
-            >
-              {loading ? 'Rafraîchissement…' : 'Rafraîchir'}
-            </button>
+            <div className="flex flex-col gap-2 md:flex-row md:items-center">
+              <button
+                type="button"
+                className="w-full md:w-auto rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                disabled={loading}
+                onClick={() => setRefreshSeq((s) => s + 1)}
+              >
+                {loading ? 'Rafraîchissement…' : 'Rafraîchir'}
+              </button>
 
-            <button
-              type="button"
-              className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
-              disabled={loading || addSubmitting}
-              onClick={openAddModal}
-            >
-              Ajouter un chauffeur
-            </button>
+              <button
+                type="button"
+                className="w-full md:w-auto rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+                disabled={loading || addSubmitting}
+                onClick={openAddModal}
+              >
+                Ajouter un chauffeur
+              </button>
+            </div>
           </div>
 
           <div className="text-sm text-zinc-600">
@@ -436,7 +438,7 @@ export default function DriversPage() {
 
         {addOpen ? (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+            className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
             role="presentation"
             onClick={() => !addSubmitting && setAddOpen(false)}
           >
@@ -444,16 +446,32 @@ export default function DriversPage() {
               role="dialog"
               aria-modal="true"
               aria-labelledby="add-driver-title"
-              className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+              className="my-6 w-full max-w-md rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[90vh] overflow-hidden"
               onClick={(ev) => ev.stopPropagation()}
             >
-              <h2 id="add-driver-title" className="text-lg font-semibold text-zinc-900">
-                Nouveau chauffeur
-              </h2>
-              <p className="mt-1 text-sm text-zinc-600">
-                Téléphone au format E.164 (ex. +261341234567).
-              </p>
-              <form className="mt-4 flex flex-col gap-3" onSubmit={submitAddDriver}>
+              <div className="flex flex-col max-h-[90vh]">
+                <div className="sticky top-0 z-10 -mx-4 border-b border-zinc-200 bg-white px-4 pb-3 sm:-mx-5 sm:px-5">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h2 id="add-driver-title" className="text-lg font-semibold text-zinc-900">
+                        Nouveau chauffeur
+                      </h2>
+                      <p className="mt-1 text-sm text-zinc-600">
+                        Téléphone au format E.164 (ex. +261341234567).
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                      disabled={addSubmitting}
+                      onClick={() => setAddOpen(false)}
+                    >
+                      Fermer
+                    </button>
+                  </div>
+                </div>
+
+                <form className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pt-4 flex flex-col gap-3" onSubmit={submitAddDriver}>
                 <label className="flex flex-col gap-1 text-sm">
                   <span className="text-zinc-700">Prénom</span>
                   <input
@@ -505,10 +523,10 @@ export default function DriversPage() {
                     {addError}
                   </div>
                 ) : null}
-                <div className="mt-2 flex justify-end gap-2">
+                <div className="mt-2 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                   <button
                     type="button"
-                    className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                    className="w-full sm:w-auto rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
                     disabled={addSubmitting}
                     onClick={() => setAddOpen(false)}
                   >
@@ -516,13 +534,14 @@ export default function DriversPage() {
                   </button>
                   <button
                     type="submit"
-                    className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+                    className="w-full sm:w-auto rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
                     disabled={addSubmitting}
                   >
                     {addSubmitting ? 'Création…' : 'Créer'}
                   </button>
                 </div>
               </form>
+              </div>
             </div>
           </div>
         ) : null}

@@ -743,7 +743,7 @@ export default function DriverDetailPage() {
 
             {deleteOpen ? (
               <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
                 role="presentation"
                 onClick={() => !deleteSubmitting && setDeleteOpen(false)}
               >
@@ -751,13 +751,23 @@ export default function DriverDetailPage() {
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="delete-driver-title"
-                  className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  className="my-6 w-full max-w-md rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[90vh] overflow-y-auto overflow-x-hidden"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
-                  <h2 id="delete-driver-title" className="text-lg font-semibold text-zinc-900">
-                    Désactiver ce chauffeur ?
-                  </h2>
+                  <div className="flex items-start justify-between gap-3">
+                    <h2 id="delete-driver-title" className="text-lg font-semibold text-zinc-900">
+                      Désactiver ce chauffeur ?
+                    </h2>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                      disabled={deleteSubmitting}
+                      onClick={() => setDeleteOpen(false)}
+                    >
+                      Fermer
+                    </button>
+                  </div>
                   <p className="mt-2 text-sm text-zinc-600">
                     Le compte sera désactivé (plus de connexion appli), retiré de la liste opérationnelle, et
                     les affectations véhicule seront closes. Les courses et l’historique financier restent en
@@ -801,7 +811,7 @@ export default function DriverDetailPage() {
 
             {vehicleRetireOpen ? (
               <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
                 role="presentation"
                 onClick={() => !vehicleRetireSubmitting && setVehicleRetireOpen(false)}
               >
@@ -809,13 +819,23 @@ export default function DriverDetailPage() {
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="retire-vehicle-title"
-                  className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  className="my-6 w-full max-w-md rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[90vh] overflow-y-auto overflow-x-hidden"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
-                  <h2 id="retire-vehicle-title" className="text-lg font-semibold text-zinc-900">
-                    Retirer le véhicule actuel ?
-                  </h2>
+                  <div className="flex items-start justify-between gap-3">
+                    <h2 id="retire-vehicle-title" className="text-lg font-semibold text-zinc-900">
+                      Retirer le véhicule actuel ?
+                    </h2>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                      disabled={vehicleRetireSubmitting}
+                      onClick={() => setVehicleRetireOpen(false)}
+                    >
+                      Fermer
+                    </button>
+                  </div>
                   <p className="mt-2 text-sm text-zinc-600">
                     Cette action clôture l’assignation active (historique conservé). Aucun véhicule n’est supprimé.
                   </p>
@@ -857,7 +877,7 @@ export default function DriverDetailPage() {
 
             {vehicleSetOpen ? (
               <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
                 role="presentation"
                 onClick={() => !vehicleSetSubmitting && setVehicleSetOpen(false)}
               >
@@ -865,13 +885,23 @@ export default function DriverDetailPage() {
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="set-vehicle-title"
-                  className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  className="my-6 w-full max-w-md rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[90vh] overflow-y-auto overflow-x-hidden"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
-                  <h2 id="set-vehicle-title" className="text-lg font-semibold text-zinc-900">
-                    {data.current_vehicle ? 'Remplacer le véhicule' : 'Ajouter un véhicule'}
-                  </h2>
+                  <div className="flex items-start justify-between gap-3">
+                    <h2 id="set-vehicle-title" className="text-lg font-semibold text-zinc-900">
+                      {data.current_vehicle ? 'Remplacer le véhicule' : 'Ajouter un véhicule'}
+                    </h2>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                      disabled={vehicleSetSubmitting}
+                      onClick={() => setVehicleSetOpen(false)}
+                    >
+                      Fermer
+                    </button>
+                  </div>
                   <p className="mt-2 text-sm text-zinc-600">
                     Cette action clôture l’assignation active si elle existe, crée un nouveau véhicule, puis assigne ce véhicule au chauffeur.
                   </p>
@@ -926,7 +956,7 @@ export default function DriverDetailPage() {
 
             {reactivateOpen ? (
               <div
-                className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+                className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-2 sm:items-center sm:p-4"
                 role="presentation"
                 onClick={() => !reactivateSubmitting && setReactivateOpen(false)}
               >
@@ -934,13 +964,23 @@ export default function DriverDetailPage() {
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="reactivate-driver-title"
-                  className="w-full max-w-md rounded-xl border border-zinc-200 bg-white p-5 shadow-lg"
+                  className="my-6 w-full max-w-md rounded-xl border border-zinc-200 bg-white p-4 shadow-lg sm:my-0 sm:p-5 max-h-[90vh] overflow-y-auto overflow-x-hidden"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDown={(e) => e.stopPropagation()}
                 >
-                  <h2 id="reactivate-driver-title" className="text-lg font-semibold text-zinc-900">
-                    Réactiver ce chauffeur ?
-                  </h2>
+                  <div className="flex items-start justify-between gap-3">
+                    <h2 id="reactivate-driver-title" className="text-lg font-semibold text-zinc-900">
+                      Réactiver ce chauffeur ?
+                    </h2>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm hover:bg-zinc-100 disabled:opacity-50"
+                      disabled={reactivateSubmitting}
+                      onClick={() => setReactivateOpen(false)}
+                    >
+                      Fermer
+                    </button>
+                  </div>
                   <p className="mt-2 text-sm text-zinc-600">
                     Le compte redevient actif dans l’admin (liste Actifs), le soft-delete est annulé et la
                     connexion appli est de nouveau autorisée si le bannissement Auth a été levé.

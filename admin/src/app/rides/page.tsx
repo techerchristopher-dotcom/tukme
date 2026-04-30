@@ -51,12 +51,12 @@ export default function RidesPage() {
   return (
     <RequireAuth>
       <AdminShell title={`Courses ${titleSuffix}`.trim()}>
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div className="flex flex-wrap items-end gap-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between md:gap-4">
+          <div className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-end md:gap-4">
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-zinc-700">Jour (Madagascar)</span>
               <input
-                className="w-44 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                className="w-full md:w-44 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                 type="date"
                 value={businessDate}
                 onChange={(e) => {
@@ -69,7 +69,7 @@ export default function RidesPage() {
             <label className="flex flex-col gap-1 text-sm">
               <span className="text-zinc-700">Finalisation</span>
               <select
-                className="w-56 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
+                className="w-full md:w-56 rounded-lg border border-zinc-200 px-3 py-2 outline-none focus:border-zinc-400"
                 value={finalized}
                 onChange={(e) => {
                   setFinalized(e.target.value as any);
